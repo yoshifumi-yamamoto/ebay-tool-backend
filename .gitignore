@@ -1,0 +1,23 @@
+# ディレクトリにあるnode_modulesフォルダを無視
+node_modules/
+
+# 環境変数が保存されている.envファイルを無視
+.env
+
+# ログファイルを無視
+*.log
+
+# ディレクトリにあるDS_Storeファイルを無視（macOSの場合）
+.DS_Store
+
+# ディレクトリにあるThumbs.dbファイルを無視（Windowsの場合）
+Thumbs.db
+
+# npmデバッグログを無視
+npm-debug.log*
+
+# プロジェクトのビルドディレクトリを無視
+/dist
+
+# 他に無視したいファイルやディレクトリがあれば、以下に追加
+# /path_to_ignore
