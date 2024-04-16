@@ -2,13 +2,14 @@ const express = require('express');
 require('dotenv').config();
 const axios = require('axios');
 const app = express();
+const supabase = require('./supabaseClient');
 
 // eBay APIリクエスト関数
 const ebayApiRequest = async () => {
   try {
     const { data } = await axios({
       method: 'get',
-      url: 'https://api.ebay.com/sell/analytics/v1/traffic_report',
+      url: 'https://api.ebay.com/sell/stores/v1/store',
       headers: {
         'X-EBAY-API-SITEID': '0',
         'X-EBAY-API-CALL-NAME': 'GetOrders',
@@ -42,6 +43,31 @@ app.get('/ebay-orders', async (req, res) => {
       error: error.message // レスポンスにエラーメッセージを含める
     });
   }
+});
+
+async function getUsers() {
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+
+  if (error) {
+    console.error('Error fetching users:', error)
+    return { error }
+  }
+
+  return { data }
+}
+
+app.get('/users', async (req, res) => {
+  const { data, error } = await getUsers() 
+  if (error) {
+    console.error('Error fetching users:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  if (data.length === 0) {
+    return res.status(404).json({ message: 'No users found' });
+  }
+  res.json(data);
 });
 
 app.listen(PORT, () => {
