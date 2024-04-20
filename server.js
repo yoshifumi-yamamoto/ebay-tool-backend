@@ -4,20 +4,51 @@ const axios = require('axios');
 const app = express();
 const supabase = require('./supabaseClient');
 
+const cors = require('cors');
+app.use(cors());
+
+const CLIENT_ID = process.env.EBAY_APP_ID;
+const CLIENT_SECRET = process.env.EBAY_CERT_ID;
+
+let accessToken = null;
+let tokenExpires = null;
+
+// トークンを取得する関数
+async function getAccessToken() {
+  if (accessToken && new Date() < tokenExpires) {
+    return accessToken;  // 既存のトークンが有効な場合はそれを返す
+  }
+
+  const response = await axios({
+    method: 'post',
+    url: 'https://api.ebay.com/identity/v1/oauth2/token',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Authorization': `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')}`
+    },
+    data: 'grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope'
+  });
+  accessToken = response.data.access_token;
+  tokenExpires = new Date(new Date().getTime() + response.data.expires_in * 1000);
+  return accessToken;
+}
+
 // eBay APIリクエスト関数
 const ebayApiRequest = async () => {
   try {
+    const token = await getAccessToken();
     const { data } = await axios({
       method: 'get',
       url: 'https://api.ebay.com/sell/stores/v1/store',
       headers: {
         'X-EBAY-API-SITEID': '0',
-        'X-EBAY-API-CALL-NAME': 'GetOrders',
+        // 'X-EBAY-API-CALL-NAME': 'GetOrders',
         'X-EBAY-API-APP-NAME': process.env.EBAY_APP_ID,
         'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID,
         'X-EBAY-API-CERT-NAME': process.env.EBAY_CERT_ID,
         'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
         'Content-Type': 'application/json',
+        // 'Authorization': `Bearer ${token}`
         'Authorization': `Bearer ${process.env.EBAY_USER_TOKEN}`
       }});
 
@@ -29,7 +60,7 @@ const ebayApiRequest = async () => {
   }
 };
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5001;
 
 // ルート定義: eBayの注文データを取得
 app.get('/ebay-orders', async (req, res) => {
