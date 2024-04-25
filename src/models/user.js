@@ -1,10 +1,9 @@
 // src/models/user.js
-module.exports = (sequelize, DataTypes) => {
-  const User = sequelize.define('User', {
-    username: DataTypes.STRING,
-    email: DataTypes.STRING,
-    password: DataTypes.STRING
-  });
-
-  return User;
+const user = {
+  id: 'serial primary key',
+  username: 'varchar(255)',
+  email: 'varchar(255) unique',
+  password: 'varchar(255)'
 };
+
+module.exports = user;

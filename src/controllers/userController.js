@@ -1,22 +1,47 @@
 // src/controllers/userController.js
-const db = require('../models'); // DBインスタンスの取得
+
+const supabase = require('../supabaseClient');
 
 exports.getAllUsers = async (req, res) => {
-  try {
-    const users = await db.User.findAll();
-    res.send(users);
-  } catch (error) {
-    res.status(500).send(error.message);
+  const { data, error } = await supabase
+    .from('users')
+    .select('*');
+  
+  if (error) {
+    console.error('Error fetching users:', error);
+    return res.status(500).json({ error: error.message });
   }
+
+  res.json(data);
 };
 
 exports.createUser = async (req, res) => {
-  try {
-    const user = await db.User.create(req.body);
-    res.status(201).send(user);
-  } catch (error) {
-    res.status(500).send(error.message);
+  const { data, error } = await supabase
+    .from('users')
+    .insert([req.body]);
+  
+  if (error) {
+    console.error('Error creating user:', error);
+    return res.status(500).json({ error: error.message });
   }
+
+  res.status(201).json(data);
 };
 
-// 他の関数も同様に定義
+exports.getUserById = async (req, res) => {
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', req.params.id);
+
+  if (error) {
+    console.error('Error fetching user:', error);
+    return res.status(500).json({ error: error.message });
+  }
+
+  if (data.length === 0) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  res.json(data[0]);
+};

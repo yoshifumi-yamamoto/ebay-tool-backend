@@ -2,7 +2,7 @@ const express = require('express');
 require('dotenv').config();
 const axios = require('axios');
 const app = express();
-const supabase = require('./supabaseClient');
+const supabase = require('./src/supabaseClient');
 
 const cors = require('cors');
 app.use(cors());
