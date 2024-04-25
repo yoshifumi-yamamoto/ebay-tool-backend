@@ -26,6 +26,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/User'
+    get:
+      summary: List all users
+      tags:
+        - Users
+      responses:
+        '200':
+          description: An array of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+
+  /users/{userId}:
+    get:
+      summary: Retrieve a user by ID
+      tags:
+        - Users
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Detailed information of a user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
     patch:
       summary: Update an existing user
       tags:
@@ -75,7 +107,7 @@ paths:
             schema:
               type: object
               properties:
-                email:
+                username:
                   type: string
                 password:
                   type: string
