@@ -43,12 +43,13 @@ async function saveOrdersToSupabase(orders) {
                 order_no: order.orderId,
                 order_date: order.creationDate,
                 total_amount: order.totalFeeBasisAmount.value,
-                buyer_id: order.buyer.username,
+                ebay_buyer_id: order.buyer.username,
                 ebay_user_id: 2,
                 status: order.orderPaymentStatus
               }]);
           if (error) {
-              console.error('Error saving new order to Supabase:', error);
+              console.error('Error saving order to Supabase:', error, 'with order orderData:', data);
+              throw new Error(`Failed to save order: ${error.message}`);
           } else {
               console.log('Order saved successfully:', data);
           }
@@ -58,7 +59,7 @@ async function saveOrdersToSupabase(orders) {
               .from('orders')
               .update({
                 total_amount: order.totalFeeBasisAmount.value,
-                buyer_id: order.buyer.username,
+                ebay_buyer_id: order.buyer.username,
                 ebay_user_id: 2,
                 status: order.orderPaymentStatus
               })
