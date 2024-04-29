@@ -1,10 +1,13 @@
 const orderService = require('../services/orderService');
+const buyerService = require('../services/buyerService'); // buyerServiceのインポート
 
 exports.syncOrders = async (req, res) => {
     try {
-        const orders = await orderService.fetchOrdersFromEbay();
-        await orderService.saveOrdersToSupabase(orders);
-        res.status(200).send('Orders synced successfully');
+        const orders = await orderService.fetchOrdersFromEbay(); // eBayから注文データを取得
+        const buyers = await buyerService.fetchAllBuyers(); // すべてのバイヤー情報を取得
+        console.log("syncOrders",buyers)
+        await orderService.saveOrdersToSupabase(orders, buyers); // 注文データとバイヤー情報を処理
+        res.status(200).send('Orders and buyers processed successfully');
     } catch (error) {
         console.error('Failed to sync orders:', error);
         res.status(500).json({ error: error.message });

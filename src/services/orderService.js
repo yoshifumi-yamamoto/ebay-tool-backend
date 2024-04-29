@@ -1,6 +1,7 @@
 const axios = require('axios');
-const { getEbayUserToken } = require('./authService');  // 正しいパスを指定
-
+const { getEbayUserToken } = require('./authService');
+const supabase = require('../supabaseClient');
+const { fetchBuyerByEbayId } = require('./buyerService'); // 必要な関数をインポート
 
 async function fetchOrdersFromEbay() {
     const accessToken = await getEbayUserToken();
@@ -20,59 +21,33 @@ async function fetchOrdersFromEbay() {
     }
 }
 
-const supabase = require('../supabaseClient');
-
-async function saveOrdersToSupabase(orders) {
+async function saveOrdersToSupabase(orders, buyers) {
+  console.log('Received orders to save:', orders.length); // 受け取った注文数をログ出力
   for (const order of orders) {
-      const { data: existingOrder, error: existingOrderError } = await supabase
-          .from('orders')
-          .select('*')
-          .eq('order_no', order.orderId)
-          .single();
-
-      if (existingOrderError) {
-          console.error('Error checking existing order:', existingOrderError);
+      const buyer = buyers.find(b => b.ebay_buyer_id === order.buyer.username);
+      if (!buyer) {
+          console.error('No buyer found for order:', order.orderId);
           continue;
       }
 
-      if (!existingOrder) {
-          // 注文が存在しない場合は新規挿入
-          const { data, error } = await supabase
-              .from('orders')
-              .insert([{
-                order_no: order.orderId,
-                order_date: order.creationDate,
-                total_amount: order.totalFeeBasisAmount.value,
-                ebay_buyer_id: order.buyer.username,
-                ebay_user_id: 2,
-                status: order.orderPaymentStatus
-              }]);
-          if (error) {
-              console.error('Error saving order to Supabase:', error, 'with order orderData:', data);
-              throw new Error(`Failed to save order: ${error.message}`);
-          } else {
-              console.log('Order saved successfully:', data);
-          }
-      } else {
-          // 既存の注文がある場合は更新
-          const { data, error } = await supabase
-              .from('orders')
-              .update({
-                total_amount: order.totalFeeBasisAmount.value,
-                ebay_buyer_id: order.buyer.username,
-                ebay_user_id: 2,
-                status: order.orderPaymentStatus
-              })
-              .eq('order_no', order.orderId);
+      const orderData = {
+        order_no: order.orderId,
+        order_date: order.creationDate,
+        total_amount: order.totalFeeBasisAmount.value,
+        ebay_buyer_id: order.buyer.username,
+        buyer_id: buyer.id, // このバイヤーIDを使用して注文を保存
+        status: order.orderPaymentStatus
+      };
 
-          if (error) {
-              console.error('Error updating order:', error);
-          } else {
-              console.log('Order updated successfully:', data);
-          }
+      const { data, error } = await supabase.from('orders').insert([orderData]);
+      if (error) {
+          console.error('Error saving order to Supabase:', error.message, 'with orderData:', orderData);
+          continue;
       }
+      console.log('Order saved successfully:', data);
   }
 }
+
 
 module.exports = {
   fetchOrdersFromEbay,
