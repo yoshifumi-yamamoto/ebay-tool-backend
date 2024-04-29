@@ -10,3 +10,13 @@ exports.processOrdersAndBuyers = async (req, res) => {
         res.status(500).json({ message: "Failed to sync buyers", error: error.message });
     }
 };
+
+exports.getAllBuyers = async (req, res) => {
+    try {
+        const buyers = await buyerService.fetchAllBuyers();
+        res.json(buyers);
+    } catch (error) {
+        console.error('Failed to fetch buyers:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
