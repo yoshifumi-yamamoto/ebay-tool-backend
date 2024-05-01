@@ -8,7 +8,7 @@ const authRoutes = require('./routes/authRoutes'); // authRoutesのインポー�
 
 const app = express();
 app.use(cors({
-  origin: 'http://localhost:3001' // Reactアプリケーションが実行されているオリジンを指定
+  // origin: 'http://localhost:3001' // Reactアプリケーションが実行されているオリジンを指定
 }));
 
 
