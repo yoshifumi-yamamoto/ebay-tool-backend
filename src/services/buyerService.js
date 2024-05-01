@@ -3,7 +3,6 @@ const supabase = require('../supabaseClient');
 // 既存のバイヤー情報を取得
 async function fetchAllBuyers() {
   const { data, error } = await supabase.from('buyers').select('*');
-  console.log("fetchAllBuyers", data)
   if (error) {
     console.error('Failed to fetch buyers:', error.message, error.details);
     throw error;
@@ -82,5 +81,6 @@ async function processOrdersAndBuyers(orders) {
 module.exports = {
   processOrdersAndBuyers,
   fetchBuyerByEbayId,
-  fetchAllBuyers
+  fetchAllBuyers,
+  upsertBuyer
 };
