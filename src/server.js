@@ -24,7 +24,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/buyers', buyerRoutes);
 app.use('/api/accounts', accountRoutes);
-app.use('/auth', authRoutes);
+app.use('/api/auth', authRoutes);
 
 // サーバ起動
 const PORT = process.env.PORT || 3000;
