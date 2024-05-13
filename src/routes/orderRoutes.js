@@ -6,10 +6,10 @@ const { processOrdersAndBuyers, fetchOrdersFromEbay } = require('../services/ord
 const orderController = require('../controllers/orderController');
 
 // 特定のユーザーIDに紐づくすべての注文情報を取得
-router.get('/orders/user/:userId', orderController.getOrdersByUserId);
+router.get('/user/:userId', orderController.getOrdersByUserId);
 
 // 特定の注文情報を更新
-router.put('/orders/:orderId', orderController.updateOrder);
+router.put('/:orderId', orderController.updateOrder);
 
 router.get('/sync', async (req, res) => {
     try {
