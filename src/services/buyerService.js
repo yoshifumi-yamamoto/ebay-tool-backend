@@ -1,16 +1,25 @@
 const supabase = require('../supabaseClient');
 
 // 既存のバイヤー情報を取得
-async function fetchAllBuyers() {
-  const { data, error } = await supabase.from('buyers').select('*');
-  if (error) {
-    console.error('Failed to fetch buyers:', error.message, error.details);
-    throw error;
-  }
+async function getBuyersByUserId(userId) {
+  const { data, error } = await supabase
+      .from('buyers')
+      .select('*')
+      .eq('user_id', userId);
+  if (error) throw new Error('Failed to retrieve buyers: ' + error.message);
   return data;
 }
 
-// 新しいバイヤーを作成または更新
+async function updateBuyer (buyerId, buyerData) {
+  const { data, error } = await supabase
+      .from('buyers')
+      .update(buyerData)
+      .eq('id', buyerId);
+  if (error) throw new Error('Failed to update buyer: ' + error.message);
+  return data;
+};
+
+// 新しいバイヤーを作成または更新(ebayから)
 async function upsertBuyer(buyerInfo) {
   // SupabaseにおけるUPSERT（挿入または更新）を試みる
   const { data, error } = await supabase
@@ -81,6 +90,7 @@ async function processOrdersAndBuyers(orders) {
 module.exports = {
   processOrdersAndBuyers,
   fetchBuyerByEbayId,
-  fetchAllBuyers,
-  upsertBuyer
+  getBuyersByUserId,
+  upsertBuyer,
+  updateBuyer
 };

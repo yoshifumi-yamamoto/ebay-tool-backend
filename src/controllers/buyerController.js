@@ -11,12 +11,20 @@ exports.processOrdersAndBuyers = async (req, res) => {
     }
 };
 
-exports.getAllBuyers = async (req, res) => {
+exports.getBuyersByUserId = async (req, res) => {
     try {
-        const buyers = await buyerService.fetchAllBuyers();
+        const buyers = await buyerService.getBuyersByUserId(req.params.userId);
         res.json(buyers);
     } catch (error) {
-        console.error('Failed to fetch buyers:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+exports.updateBuyer = async (req, res) => {
+    try {
+        const updatedBuyer = await buyerService.updateBuyer(req.params.buyerId, req.body);
+        res.json(updatedBuyer);
+    } catch (error) {
         res.status(500).json({ error: error.message });
     }
 };
