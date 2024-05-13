@@ -26,3 +26,12 @@ exports.getOrdersByUserId = async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 };
+
+exports.updateOrder = async (req, res) => {
+    try {
+        const updatedOrder = await orderService.updateOrder(req.params.orderId, req.body);
+        res.json(updatedOrder);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};

@@ -99,9 +99,19 @@ async function getOrdersByUserId (userId) {
     return orders;
 };
 
+async function updateOrder (orderId, orderData) {
+    const { data, error } = await supabase
+        .from('orders')
+        .update(orderData)
+        .eq('id', orderId);
+    if (error) throw new Error('Failed to update order: ' + error.message);
+    return data;
+};
+
 module.exports = {
   fetchOrdersFromEbay,
   saveOrdersToSupabase,
   processOrdersAndBuyers,
-  getOrdersByUserId
+  getOrdersByUserId,
+  updateOrder
 };
