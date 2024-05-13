@@ -89,10 +89,19 @@ async function processOrdersAndBuyers(orders) {
     await saveOrdersToSupabase(orderDatas, buyers);
 }
   
+async function getOrdersByUserId (userId) {
+    let { data: orders, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('user_id', userId);
 
+    if (error) throw new Error('Failed to fetch orders: ' + error.message);
+    return orders;
+};
 
 module.exports = {
   fetchOrdersFromEbay,
   saveOrdersToSupabase,
-  processOrdersAndBuyers
+  processOrdersAndBuyers,
+  getOrdersByUserId
 };

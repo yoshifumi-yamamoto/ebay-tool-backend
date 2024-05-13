@@ -1,25 +1,32 @@
 const express = require('express');
-const bodyParser = require('body-parser');
 const cors = require('cors');
-const userRoutes = require('./routes/userRoutes'); // ルートのインポート
+
+// ルートのインポート
+const userRoutes = require('./routes/userRoutes');
 const orderRoutes = require('./routes/orderRoutes');
 const buyerRoutes = require('./routes/buyerRoutes');
 const accountRoutes = require('./routes/accountRoutes');
-const authRoutes = require('./routes/authRoutes'); // authRoutesのインポート
+const authRoutes = require('./routes/authRoutes');
 
 const app = express();
+
+// CORS設定
 app.use(cors({
-  // origin: 'http://localhost:3001' // Reactアプリケーションが実行されているオリジンを指定
+  // 本番環境で適切なオリジンに設定する
+  // origin: 'http://localhost:3001'
 }));
 
+// JSONリクエストの解析
+app.use(express.json());
 
-app.use(bodyParser.json()); // JSON リクエストを解析するための設定
-app.use('/users', userRoutes); // ユーザールートをアプリに追加
-app.use('/api', orderRoutes);  // '/api'パスでorderRoutesを使用するよう設定
+// ルートの設定
+app.use('/api/users', userRoutes);
+app.use('/api/orders', orderRoutes);
 app.use('/api/buyers', buyerRoutes);
 app.use('/api/accounts', accountRoutes);
-app.use('/auth', authRoutes); // 認証ルートをアプリに追加
+app.use('/auth', authRoutes);
 
+// サーバ起動
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
