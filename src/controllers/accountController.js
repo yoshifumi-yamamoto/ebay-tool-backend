@@ -1,20 +1,28 @@
 const accountService = require('../services/accountService');
 
-exports.addAccount = async (req, res) => {
+exports.createAccount = async (req, res) => {
     try {
-        const { user_id, ebay_user_id, token, token_expiration } = req.body;
-        const result = await accountService.addAccount({ user_id, ebay_user_id, token, token_expiration });
-        res.status(201).json(result);
+        const account = await accountService.createAccount(req.body);
+        res.status(201).json(account);
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        res.status(500).json({ error: error.message });
     }
 };
 
-exports.getAccounts = async (req, res) => {
+exports.getAccountsByUserId = async (req, res) => {
     try {
-        const accounts = await accountService.getAccounts();
-        res.status(200).json(accounts);
+        const accounts = await accountService.getAccountsByUserId(req.params.userId);
+        res.json(accounts);
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        res.status(500).json({ error: error.message });
+    }
+};
+
+exports.updateAccount = async (req, res) => {
+    try {
+        const account = await accountService.updateAccount(req.params.id, req.body);
+        res.json(account);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 };

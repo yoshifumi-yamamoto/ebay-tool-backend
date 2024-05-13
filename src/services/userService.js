@@ -1,17 +1,43 @@
-// src/services/userService.js
-const db = require('../models');
+const supabase = require('../supabaseClient');
+const bcrypt = require('bcryptjs');
 
-const createUser = async (userData) => {
-  return db.User.create(userData);
+exports.createUser = async (userData) => {
+    const hashedPassword = await bcrypt.hash(userData.password, 10);
+    userData.password = hashedPassword;
+    const { data, error } = await supabase
+        .from('users')
+        .insert([
+            { ...userData }
+        ]);
+    if (error) throw new Error(error.message);
+    return data;
 };
 
-const getUserById = async (id) => {
-  return db.User.findByPk(id);
+
+exports.getUserById = async (id) => {
+    const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', id)
+        .single();
+    if (error) throw new Error(error.message);
+    return data;
 };
 
-// 他の関数も同様に定義
+exports.updateUser = async (id, userData) => {
+    const { data, error } = await supabase
+        .from('users')
+        .update(userData)
+        .eq('id', id);
+    if (error) throw new Error(error.message);
+    return data;
+};
 
-module.exports = {
-  createUser,
-  getUserById
+exports.deleteUser = async (id) => {
+    const { data, error } = await supabase
+        .from('users')
+        .delete()
+        .eq('id', id);
+    if (error) throw new Error(error.message);
+    return data;
 };
