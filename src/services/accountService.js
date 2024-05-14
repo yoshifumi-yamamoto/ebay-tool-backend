@@ -10,7 +10,6 @@ exports.createAccount = async (accountData) => {
 
 // トークンの保存
 exports.saveAccountToken = async ({ user_id, access_token, refresh_token, token_expiration }) => {
-  const supabase = require('./supabaseClient'); // Supabaseクライアントのパスを適切に設定
   const { data, error } = await supabase
     .from('accounts')
     .insert([
