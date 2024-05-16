@@ -2,9 +2,12 @@ const axios = require('axios');
 const { getEbayUserToken } = require('./authService');
 const supabase = require('../supabaseClient');
 const { fetchBuyerByEbayId, fetchAllBuyers } = require('./buyerService'); // 必要な関数をインポート
+const { fetchEbayAccountTokens, refreshEbayToken } = require("./accountService")
 
-async function fetchOrdersFromEbay(accessToken) {
+async function fetchOrdersFromEbay(refreshToken) {
     try {
+        
+        const accessToken = await refreshEbayToken(refreshToken)
         const response = await axios({
             method: 'get',
             url: 'https://api.ebay.com/sell/fulfillment/v1/order',
@@ -13,7 +16,6 @@ async function fetchOrdersFromEbay(accessToken) {
                 'Content-Type': 'application/json',
             }
         });
-        // console.log('Fetched orders:', response.data); // レスポンス構造を確認
         return response.data.orders;
     } catch (error) {
         console.error('Error fetching orders from eBay:', error);
@@ -24,8 +26,6 @@ async function fetchOrdersFromEbay(accessToken) {
 
 async function saveOrdersToSupabase(orders, buyers) {
     for (const order of orders) {
-        console.log("Processing order:", order);
-
         // バイヤー情報の検索（見つからない場合はnullを許容）
         const buyer = buyers.find(b => b.ebay_buyer_id === order.ebay_buyer_id);
 
@@ -88,6 +88,56 @@ async function processOrdersAndBuyers(orders) {
     // すべての注文データを一括で保存
     await saveOrdersToSupabase(orderDatas, buyers);
 }
+
+// すべての注文とバイヤー情報をSupabaseに保存する関数
+async function saveOrdersAndBuyers(userId) {
+    // ユーザーに紐づくすべてのeBayアカウントトークンを取得
+    const tokens = await fetchEbayAccountTokens(userId);
+    for (let token of tokens) {
+        try {
+            const orders = await fetchOrdersFromEbay(token);  // ここで refreshToken を渡すように変更
+            for (let order of orders) {
+                try {
+                    const buyer = await upsertBuyer({
+                        ebay_buyer_id: order.buyer.username,
+                        name: order.buyer.buyerRegistrationAddress.fullName,
+                        user_id: userId,
+                        ebay_user_id: order.sellerId,
+                        address: order.buyer.buyerRegistrationAddress.contactAddress,
+                        phone_number: order.buyer.buyerRegistrationAddress.primaryPhone.phoneNumber,
+                        last_purchase_date: order.creationDate,
+                        registered_date: new Date().toISOString()
+                    });
+                    if (!buyer) {
+                        console.error("Buyer upsert failed for order:", order);
+                        continue;  // バイヤー情報が適切に取得できなかった場合は次のオーダーに移行
+                    }
+                    const { data, error } = await supabase.from('orders').upsert({
+                        order_no: order.orderId,
+                        order_date: order.creationDate,
+                        total_amount: order.totalFeeBasisAmount.value,
+                        ebay_buyer_id: order.buyer.username,
+                        buyer_id: buyer.id,
+                        user_id: userId,
+                        ebay_user_id: order.sellerId,
+                        line_items: order.lineItems,
+                        ship_to:order.fulfillmentStartInstructions[0].shippingStep.shipTo,
+                        shipping_deadline: order.lineItems[0].lineItemFulfillmentInstructions.shipByDate,
+                        status: order.orderPaymentStatus
+                    }, { onConflict: 'order_no' });
+                    if (error) {
+                        console.error('Error saving/updating order in Supabase:', error.message);
+                    }
+                } catch (error) {
+                    console.error('Error processing order:', error);
+                }
+            }
+        } catch (error) {
+            console.error('Failed to fetch or process orders:', error);
+        }
+    }
+}
+
   
 async function getOrdersByUserId (userId) {
     let { data: orders, error } = await supabase
@@ -112,6 +162,7 @@ module.exports = {
   fetchOrdersFromEbay,
   saveOrdersToSupabase,
   processOrdersAndBuyers,
+  saveOrdersAndBuyers,
   getOrdersByUserId,
   updateOrder
 };
