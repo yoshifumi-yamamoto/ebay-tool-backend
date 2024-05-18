@@ -13,7 +13,7 @@ exports.processOrdersAndBuyers = async (req, res) => {
 
 exports.getBuyersByUserId = async (req, res) => {
     try {
-        const buyers = await buyerService.getBuyersByUserId(req.params.userId);
+        const buyers = await buyerService.getBuyersByUserId(req.query.userId);
         res.json(buyers);
     } catch (error) {
         res.status(500).json({ error: error.message });

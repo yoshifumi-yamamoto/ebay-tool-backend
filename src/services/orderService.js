@@ -3,16 +3,15 @@ const { getEbayUserToken } = require('./authService');
 const supabase = require('../supabaseClient');
 const { fetchBuyerByEbayId, fetchAllBuyers } = require('./buyerService'); // 必要な関数をインポート
 const { fetchEbayAccountTokens, refreshEbayToken } = require("./accountService")
+const { fetchItemImages, fetchItemImage, fetchItemDetails } = require("./itemService")
 
 async function fetchOrdersFromEbay(refreshToken) {
     try {
-        
-        const accessToken = await refreshEbayToken(refreshToken)
         const response = await axios({
             method: 'get',
             url: 'https://api.ebay.com/sell/fulfillment/v1/order',
             headers: {
-                'Authorization': `Bearer ${accessToken}`,
+                'Authorization': `Bearer ${refreshToken}`,
                 'Content-Type': 'application/json',
             }
         });
@@ -22,7 +21,6 @@ async function fetchOrdersFromEbay(refreshToken) {
         throw error;
     }
 }
-
 
 async function saveOrdersToSupabase(orders, buyers) {
     for (const order of orders) {
@@ -91,11 +89,34 @@ async function processOrdersAndBuyers(orders) {
 
 // すべての注文とバイヤー情報をSupabaseに保存する関数
 async function saveOrdersAndBuyers(userId) {
-    // ユーザーに紐づくすべてのeBayアカウントトークンを取得
     const tokens = await fetchEbayAccountTokens(userId);
     for (let token of tokens) {
         try {
-            const orders = await fetchOrdersFromEbay(token);  // ここで refreshToken を渡すように変更
+            const accessToken = await refreshEbayToken(token)
+            const orders = await fetchOrdersFromEbay(accessToken);
+            
+            const legacyItemIds = orders.flatMap(order => order.lineItems.map(item => item.legacyItemId));
+
+            // Supabaseから既存の注文を取得
+            const { data: existingOrders, error: existingOrdersError } = await supabase
+                .from('orders')
+                .select('order_no, line_items')
+                .in('order_no', orders.map(order => order.orderId));
+
+            if (existingOrdersError) {
+                console.error('Error fetching existing orders from Supabase:', existingOrdersError.message);
+                continue;
+            }
+
+            const existingImages = {};
+            existingOrders.forEach(order => {
+                order.line_items.forEach(item => {
+                    if (item.itemImage) {
+                        existingImages[item.legacyItemId] = item.itemImage;
+                    }
+                });
+            });
+
             for (let order of orders) {
                 try {
                     const buyer = await upsertBuyer({
@@ -110,8 +131,28 @@ async function saveOrdersAndBuyers(userId) {
                     });
                     if (!buyer) {
                         console.error("Buyer upsert failed for order:", order);
-                        continue;  // バイヤー情報が適切に取得できなかった場合は次のオーダーに移行
+                        continue;
                     }
+
+                    const lineItemFulfillmentStatus = order.lineItems?.[0]?.lineItemFulfillmentStatus || 'NOT_STARTED';
+
+                    const lineItems = await Promise.all(order.lineItems.map(async (item) => {
+                        let itemImage = existingImages[item.legacyItemId];
+                        if (!itemImage) {
+                            try {
+                                const itemDetails = await fetchItemDetails(item.legacyItemId, accessToken);
+                                itemImage = itemDetails ? itemDetails.PictureURL : null;
+                            } catch (error) {
+                                console.error('Error fetching item image:', error.message);
+                                itemImage = null;
+                            }
+                        }
+                        return {
+                            ...item,
+                            itemImage,
+                        };
+                    }));
+
                     const { data, error } = await supabase.from('orders').upsert({
                         order_no: order.orderId,
                         order_date: order.creationDate,
@@ -120,10 +161,12 @@ async function saveOrdersAndBuyers(userId) {
                         buyer_id: buyer.id,
                         user_id: userId,
                         ebay_user_id: order.sellerId,
-                        line_items: order.lineItems,
-                        ship_to:order.fulfillmentStartInstructions[0].shippingStep.shipTo,
+                        line_items: lineItems,
+                        ship_to: order.fulfillmentStartInstructions[0].shippingStep.shipTo,
                         shipping_deadline: order.lineItems[0].lineItemFulfillmentInstructions.shipByDate,
-                        status: order.orderPaymentStatus
+                        ebay_shipment_status: lineItemFulfillmentStatus,
+                        status: order.orderPaymentStatus,
+                        delivered_msg_status: 'UNSEND'
                     }, { onConflict: 'order_no' });
                     if (error) {
                         console.error('Error saving/updating order in Supabase:', error.message);
@@ -138,6 +181,7 @@ async function saveOrdersAndBuyers(userId) {
     }
 }
 
+
   
 async function getOrdersByUserId (userId) {
     let { data: orders, error } = await supabase
@@ -149,14 +193,33 @@ async function getOrdersByUserId (userId) {
     return orders;
 };
 
-async function updateOrder (orderId, orderData) {
+// ebay上で未発送かつ発送後のmsgを送っていないデータを取得
+async function fetchRelevantOrders(userId) {
+    const { data, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('user_id', userId)
+        .or('ebay_shipment_status.neq.FULFILLED,delivered_msg_status.neq.SEND');
+
+    if (error) {
+        console.error('Error fetching relevant orders:', error.message);
+        return [];
+    }
+
+    return data;
+}
+
+
+async function updateOrder(orderId, orderData) {
     const { data, error } = await supabase
         .from('orders')
         .update(orderData)
-        .eq('id', orderId);
+        .eq('id', orderId)
+        .single(); // .single() を追加して、1つのオブジェクトを返すようにします。
     if (error) throw new Error('Failed to update order: ' + error.message);
-    return data;
+    return data; // dataは更新された注文のオブジェクトであることを確認してください。
 };
+
 
 module.exports = {
   fetchOrdersFromEbay,
@@ -164,5 +227,6 @@ module.exports = {
   processOrdersAndBuyers,
   saveOrdersAndBuyers,
   getOrdersByUserId,
+  fetchRelevantOrders,
   updateOrder
 };
