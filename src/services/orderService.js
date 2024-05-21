@@ -4,6 +4,7 @@ const supabase = require('../supabaseClient');
 const { fetchBuyerByEbayId, fetchAllBuyers } = require('./buyerService'); // 必要な関数をインポート
 const { fetchEbayAccountTokens, refreshEbayToken } = require("./accountService")
 const { fetchItemImages, fetchItemImage, fetchItemDetails } = require("./itemService")
+const { upsertBuyer } = require('./buyerService');
 
 async function fetchOrdersFromEbay(refreshToken) {
     try {
@@ -20,6 +21,90 @@ async function fetchOrdersFromEbay(refreshToken) {
         console.error('Error fetching orders from eBay:', error);
         throw error;
     }
+}
+
+/**
+ * 注文情報からバイヤー情報を取得し、データベースにアップサートする関数
+ * @param {Object} order - バイヤー情報を含む注文オブジェクト
+ * @param {number} userId - ユーザーID
+ * @returns {Object} - バイヤー情報
+ */
+async function fetchAndUpsertBuyer(order, userId) {
+    return await upsertBuyer({
+        ebay_buyer_id: order.buyer.username,
+        name: order.buyer.buyerRegistrationAddress.fullName,
+        user_id: userId,
+        ebay_user_id: order.sellerId,
+        address: order.buyer.buyerRegistrationAddress.contactAddress,
+        phone_number: order.buyer.buyerRegistrationAddress.primaryPhone.phoneNumber,
+        last_purchase_date: order.creationDate,
+        registered_date: new Date().toISOString()
+    });
+}
+
+/**
+ * 商品画像の取得やitemsテーブルからの商品データの更新を含む、ラインアイテムを取得して処理する関数
+ * @param {Object} order - ラインアイテムを含む注文オブジェクト
+ * @param {string} accessToken - eBay APIのアクセストークン
+ * @param {Object} existingImages - 既存の画像マップ
+ * @param {Object} itemsMap - itemsテーブルからの商品のマップ
+ * @returns {Array} - 処理されたラインアイテム
+ */
+async function fetchAndProcessLineItems(order, accessToken, existingImages, itemsMap) {
+    return await Promise.all(order.lineItems.map(async (item) => {
+        let itemImage = existingImages[item.legacyItemId];
+        if (!itemImage) {
+            try {
+                const itemDetails = await fetchItemDetails(item.legacyItemId, accessToken);
+                itemImage = itemDetails ? itemDetails.PictureURL : null;
+            } catch (error) {
+                console.error('商品画像の取得エラー:', error.message);
+                itemImage = null;
+            }
+        }
+
+        const itemData = itemsMap[item.legacyItemId];
+        return {
+            ...item,
+            itemImage,
+            stocking_url: itemData ? itemData.stocking_url : null,
+            cost_price: itemData ? itemData.cost_price : null
+        };
+    }));
+}
+
+/**
+ * 注文情報をSupabaseにアップサートする関数
+ * @param {Object} order - 注文の詳細を含む注文オブジェクト
+ * @param {number} buyerId - バイヤーID
+ * @param {number} userId - ユーザーID
+ * @param {Array} lineItems - 処理されたラインアイテム
+ * @param {number} shippingCost - 送料
+ * @param {string} lineItemFulfillmentStatus - ラインアイテムの履行状況
+ * @returns {Object} - 更新された注文データ
+ */
+async function updateOrderInSupabase(order, buyerId, userId, lineItems, shippingCost, lineItemFulfillmentStatus) {
+    const { data, error } = await supabase.from('orders').upsert({
+        order_no: order.orderId,
+        order_date: order.creationDate,
+        total_amount: order.totalFeeBasisAmount.value,
+        ebay_buyer_id: order.buyer.username,
+        buyer_id: buyerId,
+        user_id: userId,
+        ebay_user_id: order.sellerId,
+        line_items: lineItems,
+        ship_to: order.fulfillmentStartInstructions[0].shippingStep.shipTo,
+        shipping_deadline: order.lineItems[0].lineItemFulfillmentInstructions.shipByDate,
+        ebay_shipment_status: lineItemFulfillmentStatus,
+        status: order.orderPaymentStatus,
+        delivered_msg_status: 'UNSEND',
+        shipping_cost: shippingCost // 送料を設定
+    }, { onConflict: 'order_no' });
+
+    if (error) {
+        console.error('Supabaseでの注文の保存/更新エラー:', error.message);
+    }
+    return data;
 }
 
 async function saveOrdersToSupabase(orders, buyers) {
@@ -51,7 +136,7 @@ async function saveOrdersToSupabase(orders, buyers) {
 }
 
 // orderService.js
-const { upsertBuyer } = require('./buyerService');
+
 
 async function processOrdersAndBuyers(orders) {
     if (!Array.isArray(orders)) {
@@ -92,19 +177,18 @@ async function saveOrdersAndBuyers(userId) {
     const tokens = await fetchEbayAccountTokens(userId);
     for (let token of tokens) {
         try {
-            const accessToken = await refreshEbayToken(token)
+            const accessToken = await refreshEbayToken(token);
             const orders = await fetchOrdersFromEbay(accessToken);
             
             const legacyItemIds = orders.flatMap(order => order.lineItems.map(item => item.legacyItemId));
 
-            // Supabaseから既存の注文を取得
             const { data: existingOrders, error: existingOrdersError } = await supabase
                 .from('orders')
                 .select('order_no, line_items')
                 .in('order_no', orders.map(order => order.orderId));
 
             if (existingOrdersError) {
-                console.error('Error fetching existing orders from Supabase:', existingOrdersError.message);
+                console.error('Supabaseからの既存注文の取得エラー:', existingOrdersError.message);
                 continue;
             }
 
@@ -117,66 +201,43 @@ async function saveOrdersAndBuyers(userId) {
                 });
             });
 
+            const { data: itemsData, error: itemsError } = await supabase
+                .from('items')
+                .select('*')
+                .in('ebay_item_id', legacyItemIds);
+
+            if (itemsError) {
+                console.error('Supabaseからの商品の取得エラー:', itemsError.message);
+                continue;
+            }
+
+            const itemsMap = {};
+            itemsData.forEach(item => {
+                itemsMap[item.ebay_item_id] = item;
+            });
+            
+
             for (let order of orders) {
                 try {
-                    const buyer = await upsertBuyer({
-                        ebay_buyer_id: order.buyer.username,
-                        name: order.buyer.buyerRegistrationAddress.fullName,
-                        user_id: userId,
-                        ebay_user_id: order.sellerId,
-                        address: order.buyer.buyerRegistrationAddress.contactAddress,
-                        phone_number: order.buyer.buyerRegistrationAddress.primaryPhone.phoneNumber,
-                        last_purchase_date: order.creationDate,
-                        registered_date: new Date().toISOString()
-                    });
+                    const buyer = await fetchAndUpsertBuyer(order, userId);
                     if (!buyer) {
-                        console.error("Buyer upsert failed for order:", order);
+                        console.error("注文に対するバイヤーのアップサート失敗:", order);
                         continue;
                     }
 
                     const lineItemFulfillmentStatus = order.lineItems?.[0]?.lineItemFulfillmentStatus || 'NOT_STARTED';
 
-                    const lineItems = await Promise.all(order.lineItems.map(async (item) => {
-                        let itemImage = existingImages[item.legacyItemId];
-                        if (!itemImage) {
-                            try {
-                                const itemDetails = await fetchItemDetails(item.legacyItemId, accessToken);
-                                itemImage = itemDetails ? itemDetails.PictureURL : null;
-                            } catch (error) {
-                                console.error('Error fetching item image:', error.message);
-                                itemImage = null;
-                            }
-                        }
-                        return {
-                            ...item,
-                            itemImage,
-                        };
-                    }));
+                    const lineItems = await fetchAndProcessLineItems(order, accessToken, existingImages, itemsMap);
 
-                    const { data, error } = await supabase.from('orders').upsert({
-                        order_no: order.orderId,
-                        order_date: order.creationDate,
-                        total_amount: order.totalFeeBasisAmount.value,
-                        ebay_buyer_id: order.buyer.username,
-                        buyer_id: buyer.id,
-                        user_id: userId,
-                        ebay_user_id: order.sellerId,
-                        line_items: lineItems,
-                        ship_to: order.fulfillmentStartInstructions[0].shippingStep.shipTo,
-                        shipping_deadline: order.lineItems[0].lineItemFulfillmentInstructions.shipByDate,
-                        ebay_shipment_status: lineItemFulfillmentStatus,
-                        status: order.orderPaymentStatus,
-                        delivered_msg_status: 'UNSEND'
-                    }, { onConflict: 'order_no' });
-                    if (error) {
-                        console.error('Error saving/updating order in Supabase:', error.message);
-                    }
+                    const shippingCost = itemsMap[lineItems[0].legacyItemId].shipping_cost
+
+                    await updateOrderInSupabase(order, buyer.id, userId, lineItems, shippingCost, lineItemFulfillmentStatus);
                 } catch (error) {
-                    console.error('Error processing order:', error);
+                    console.error('注文処理エラー:', error);
                 }
             }
         } catch (error) {
-            console.error('Failed to fetch or process orders:', error);
+            console.error('注文の取得または処理の失敗:', error);
         }
     }
 }

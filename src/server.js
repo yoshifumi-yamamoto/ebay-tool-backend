@@ -7,6 +7,7 @@ const orderRoutes = require('./routes/orderRoutes');
 const buyerRoutes = require('./routes/buyerRoutes');
 const accountRoutes = require('./routes/accountRoutes');
 const authRoutes = require('./routes/authRoutes');
+const sheetsRoutes = require('./routes/sheetsRoutes');
 
 const app = express();
 
@@ -25,6 +26,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/buyers', buyerRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/auth', authRoutes);
+app.use("/api/sheets",sheetsRoutes);
 
 // サーバ起動
 const PORT = process.env.PORT || 3000;
