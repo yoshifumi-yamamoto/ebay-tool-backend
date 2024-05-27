@@ -11,10 +11,19 @@ const sheetsRoutes = require('./routes/sheetsRoutes');
 
 const app = express();
 
+// 許可するオリジンのリスト
+const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.vercel.app'];
+
 // CORS設定
 app.use(cors({
-  // 本番環境で適切なオリジンに設定する
-  origin: 'http://localhost:3001'
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  optionsSuccessStatus: 200 // 一部のブラウザでCORSのリクエストに問題が発生しないようにする
 }));
 
 // JSONリクエストの解析
@@ -26,7 +35,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/buyers', buyerRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/auth', authRoutes);
-app.use("/api/sheets",sheetsRoutes);
+app.use("/api/sheets", sheetsRoutes);
 
 // サーバ起動
 const PORT = process.env.PORT || 3000;
