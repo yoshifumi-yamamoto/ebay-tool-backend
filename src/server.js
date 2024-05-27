@@ -14,7 +14,7 @@ const app = express();
 // CORS設定
 app.use(cors({
   // 本番環境で適切なオリジンに設定する
-  // origin: 'http://localhost:3001'
+  origin: 'http://localhost:3001'
 }));
 
 // JSONリクエストの解析
