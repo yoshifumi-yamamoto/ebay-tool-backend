@@ -87,6 +87,7 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     const { data, error } = await supabase.from('orders').upsert({
         order_no: order.orderId,
         order_date: order.creationDate,
+        // order earningsを入れるように修正が必要
         total_amount: order.totalFeeBasisAmount.value,
         ebay_buyer_id: order.buyer.username,
         buyer_id: buyerId,
@@ -260,7 +261,9 @@ async function fetchRelevantOrders(userId) {
         .from('orders')
         .select('*')
         .eq('user_id', userId)
-        .or('ebay_shipment_status.neq.FULFILLED,delivered_msg_status.neq.SEND');
+        .or('ebay_shipment_status.neq.FULFILLED,delivered_msg_status.neq.SEND')
+        .neq('status', 'FULLY_REFUNDED')
+        .order('order_date', { ascending: false });
 
     if (error) {
         console.error('Error fetching relevant orders:', error.message);
@@ -269,6 +272,8 @@ async function fetchRelevantOrders(userId) {
 
     return data;
 }
+
+
 
 
 async function updateOrder(orderId, orderData) {

@@ -29,6 +29,15 @@ app.use(cors({
 // JSONリクエストの解析
 app.use(express.json());
 
+app.use((req, res, next) => {
+  req.requestTime = Date.now();
+  res.on('finish', () => {
+    const responseTime = Date.now() - req.requestTime;
+    console.log(`${req.method} ${req.originalUrl} took ${responseTime}ms`);
+  });
+  next();
+});
+
 // ルートの設定
 app.use('/api/users', userRoutes);
 app.use('/api/orders', orderRoutes);
