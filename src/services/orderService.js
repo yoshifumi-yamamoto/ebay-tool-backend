@@ -216,7 +216,7 @@ async function fetchRelevantOrders(userId) {
 
 
 
-
+// 注文データの更新
 async function updateOrder(orderId, orderData) {
     const { data, error } = await supabase
         .from('orders')
@@ -227,11 +227,84 @@ async function updateOrder(orderId, orderData) {
     return data; // dataは更新された注文のオブジェクトであることを確認してください。
 };
 
+/**
+ * 先週の月曜日から日曜日の範囲を計算する関数
+ * @returns {Object} - 先週の開始日と終了日を含むオブジェクト
+ */
+function getLastWeekDateRange() {
+    const now = new Date();
+    // 現在の日付から先週の日曜日を取得
+    now.setDate(now.getDate() - now.getDay());
+    const lastSunday = new Date(now);
+    // 先週の月曜日を取得
+    now.setDate(now.getDate() - 6);
+    const lastMonday = new Date(now);
+
+    // 先週の月曜日の時刻を00:00:00に設定
+    lastMonday.setHours(0, 0, 0, 0);
+    // 先週の日曜日の時刻を23:59:59に設定
+    lastSunday.setHours(23, 59, 59, 999);
+
+    return { start: lastMonday, end: lastSunday };
+}
+
+/**
+ * 先週の注文を取得する関数
+ * @param {number} userId - ユーザーID
+ * @returns {Array} - 先週の注文データ
+ */
+async function fetchLastWeekOrders(userId) {
+    const { start, end } = getLastWeekDateRange();
+    const { data: orders, error: ordersError } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('user_id', userId)
+        .gte('order_date', start.toISOString())
+        .lte('order_date', end.toISOString())
+        .order('order_date', { ascending: false });
+
+    if (ordersError) {
+        console.error('Error fetching last week orders:', ordersError.message);
+        return [];
+    }
+
+    // 注文に含まれる全てのitemIdを収集
+    const itemIds = [...new Set(orders.flatMap(order => order.line_items.map(item => item.legacyItemId)))];
+
+    // 必要なitemIdだけを使ってitemsテーブルからデータを取得
+    const { data: items, error: itemsError } = await supabase
+        .from('items')
+        .select('*')
+        .in('ebay_item_id', itemIds);
+
+    if (itemsError) {
+        console.error('Error fetching items:', itemsError.message);
+        return [];
+    }
+
+    // itemsデータをマップに変換
+    const itemsMap = {};
+    items.forEach(item => {
+        itemsMap[item.ebay_item_id] = item;
+    });
+
+    // ordersデータにitemsデータを追加
+    const enrichedOrders = orders.map(order => {
+        const enrichedLineItems = order.line_items.map(item => {
+            const itemData = itemsMap[item.legacyItemId] || {};
+            return { ...item, ...itemData };
+        });
+        return { ...order, line_items: enrichedLineItems };
+    });
+
+    return enrichedOrders;
+}
 
 module.exports = {
   fetchOrdersFromEbay,
   saveOrdersAndBuyers,
   getOrdersByUserId,
   fetchRelevantOrders,
-  updateOrder
+  updateOrder,
+  fetchLastWeekOrders
 };
