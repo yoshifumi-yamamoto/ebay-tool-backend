@@ -83,12 +83,14 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
  * @param {string} lineItemFulfillmentStatus - ラインアイテムの履行状況
  * @returns {Object} - 更新された注文データ
  */
-async function updateOrderInSupabase(order, buyerId, userId, lineItems, shippingCost, lineItemFulfillmentStatus) {
+async function updateOrderInSupabase(order, buyerId, userId, lineItems, lineItemFulfillmentStatus) {
+    // 注文収益を計算する
+    const earningsAfterPlFee = order.paymentSummary.totalDueSeller.value * 0.979 // 注文収益 - プロモーテッドリスティングス(2.1%)
+
+    // Supabaseにデータを保存
     const { data, error } = await supabase.from('orders').upsert({
         order_no: order.orderId,
         order_date: order.creationDate,
-        // order earningsを入れるように修正が必要
-        total_amount: order.totalFeeBasisAmount.value,
         ebay_buyer_id: order.buyer.username,
         buyer_id: buyerId,
         user_id: userId,
@@ -98,8 +100,10 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         shipping_deadline: order.lineItems[0].lineItemFulfillmentInstructions.shipByDate,
         ebay_shipment_status: lineItemFulfillmentStatus,
         status: order.orderPaymentStatus,
-        delivered_msg_status: 'UNSEND',
-        shipping_cost: shippingCost // 送料を設定
+        total_amount: order.totalFeeBasisAmount.value,
+        subtotal: order.pricingSummary.priceSubtotal.value,
+        earnings: order.paymentSummary.totalDueSeller.value, // 注文収益
+        earnings_after_pl_fee: earningsAfterPlFee
     }, { onConflict: 'order_no' });
 
     if (error) {
@@ -107,6 +111,8 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     }
     return data;
 }
+
+
 
 async function saveOrdersToSupabase(orders, buyers) {
     for (const order of orders) {
