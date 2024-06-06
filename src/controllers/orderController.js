@@ -1,6 +1,6 @@
 const orderService = require('../services/orderService');
 
-// eBayの注文とバイヤー情報を同期するコントローラー関数
+// eBayの注文とバイヤー情報を同期
 exports.syncOrders = async (req, res) => {
     const userId = req.params.userId; // ユーザーIDはリクエストから取得する
     try {
@@ -14,7 +14,7 @@ exports.syncOrders = async (req, res) => {
 };
 
 
-
+// userに紐づく全注文情報の取得
 exports.getOrdersByUserId = async (req, res) => {
     const userId = req.query.userId;
     if (!userId) {
@@ -28,7 +28,7 @@ exports.getOrdersByUserId = async (req, res) => {
     }
 };
 
-// orderController.js
+// 注文情報の更新
 exports.updateOrder = async (req, res) => {
     try {
         const orderId = req.params.orderId;
