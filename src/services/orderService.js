@@ -226,8 +226,7 @@ async function fetchRelevantOrders(userId) {
         .from('orders')
         .select('*')
         .eq('user_id', userId)
-        .neq('ebay_shipment_status', 'FULFILLED')
-        .neq('delivered_msg_status', 'SEND')
+        .or('shipping_status.neq.SHIPPED,delivered_msg_status.neq.SEND')
         .neq('status', 'FULLY_REFUNDED')
         .order('order_date', { ascending: false });
 
@@ -238,6 +237,7 @@ async function fetchRelevantOrders(userId) {
 
     return data;
 }
+
 
 
 
