@@ -33,8 +33,6 @@ exports.updateOrder = async (req, res) => {
     try {
         const orderId = req.params.orderId;
         const orderData = req.body;
-        console.log('Received PUT request for order ID:', orderId); // デバッグ用に追加
-        console.log('Order Data:', orderData); // デバッグ用に追加
         const updatedOrder = await orderService.updateOrder(orderId, orderData);
         if (!updatedOrder) {
             return res.status(404).json({ error: 'Order not found' });

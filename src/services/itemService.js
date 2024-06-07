@@ -44,6 +44,7 @@ async function fetchItemDetails(legacyItemId, authToken) {
       if (response.data.Item) {
           return response.data.Item;
       } else {
+          console.log("legacyItemId",legacyItemId)
           console.error('Item not found in eBay response:', response.data);
           return null;
       }

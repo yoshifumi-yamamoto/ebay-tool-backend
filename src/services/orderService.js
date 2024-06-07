@@ -171,10 +171,12 @@ async function saveOrdersAndBuyers(userId) {
 
                     const lineItems = await fetchAndProcessLineItems(order, accessToken, existingImages, itemsMap);
 
-                    const shippingCost = itemsMap[lineItems[0].legacyItemId].shipping_cost
+                    const shippingCost = itemsMap[lineItems[0].legacyItemId]?.shipping_cost || 0
 
                     await updateOrderInSupabase(order, buyer.id, userId, lineItems, shippingCost, lineItemFulfillmentStatus);
                 } catch (error) {
+                    console.log("itemsMap",itemsMap)
+                    console.log("order.orderId,",order.orderId)
                     console.error('注文処理エラー:', error);
                 }
             }
@@ -202,7 +204,8 @@ async function fetchRelevantOrders(userId) {
         .from('orders')
         .select('*')
         .eq('user_id', userId)
-        .or('ebay_shipment_status.neq.FULFILLED,delivered_msg_status.neq.SEND')
+        .neq('ebay_shipment_status', 'FULFILLED')
+        .neq('delivered_msg_status', 'SEND')
         .neq('status', 'FULLY_REFUNDED')
         .order('order_date', { ascending: false });
 
