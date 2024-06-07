@@ -83,12 +83,24 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
  * @param {string} lineItemFulfillmentStatus - ラインアイテムの履行状況
  * @returns {Object} - 更新された注文データ
  */
-async function updateOrderInSupabase(order, buyerId, userId, lineItems, lineItemFulfillmentStatus) {
+async function updateOrderInSupabase(order, buyerId, userId, lineItems, shippingCost, lineItemFulfillmentStatus) {
     // 注文収益を計算する
-    const earningsAfterPlFee = order.paymentSummary.totalDueSeller.value * 0.979 // 注文収益 - プロモーテッドリスティングス(2.1%)
+    const earningsAfterPlFee = order.paymentSummary.totalDueSeller.value * 0.979; // 注文収益 - プロモーテッドリスティングス(2.1%)
 
-    // Supabaseにデータを保存
-    const { data, error } = await supabase.from('orders').upsert({
+    // 既存のデータを取得
+    const { data: existingData, error: fetchError } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('order_no', order.orderId)
+        .single();
+
+    if (fetchError && fetchError.code !== 'PGRST116') { // データが存在しない場合のエラーコードを無視
+        console.error('Supabaseでの注文データの取得エラー:', fetchError.message);
+        return null;
+    }
+
+    // マージするデータを作成
+    const dataToUpsert = {
         order_no: order.orderId,
         order_date: order.creationDate,
         ebay_buyer_id: order.buyer.username,
@@ -96,7 +108,10 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, lineItem
         buyer_country_code: order.buyer.buyerRegistrationAddress.contactAddress.countryCode,
         user_id: userId,
         ebay_user_id: order.sellerId,
-        line_items: lineItems,
+        line_items: lineItems.map((item, index) => ({
+            ...item,
+            cost_price: existingData ? existingData.line_items[index]?.cost_price : item.cost_price // 更新しない
+        })),
         ship_to: order.fulfillmentStartInstructions[0].shippingStep.shipTo,
         shipping_deadline: order.lineItems[0].lineItemFulfillmentInstructions.shipByDate,
         ebay_shipment_status: lineItemFulfillmentStatus,
@@ -104,14 +119,21 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, lineItem
         total_amount: order.totalFeeBasisAmount.value,
         subtotal: order.pricingSummary.priceSubtotal.value,
         earnings: order.paymentSummary.totalDueSeller.value, // 注文収益
-        earnings_after_pl_fee: earningsAfterPlFee
-    }, { onConflict: 'order_no' });
+        earnings_after_pl_fee: earningsAfterPlFee,
+        shipping_cost: existingData ? existingData.shipping_cost : shippingCost // 更新しない
+    };
+
+    // Supabaseにデータを保存
+    const { data, error } = await supabase
+        .from('orders')
+        .upsert(dataToUpsert, { onConflict: 'order_no' });
 
     if (error) {
         console.error('Supabaseでの注文の保存/更新エラー:', error.message);
     }
     return data;
 }
+
 
 
 // すべての注文とバイヤー情報をSupabaseに保存する関数
