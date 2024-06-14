@@ -33,13 +33,19 @@ exports.updateOrder = async (req, res) => {
     try {
         const orderId = req.params.orderId;
         const orderData = req.body;
+        console.log('Request to update order:', orderId, orderData); // リクエストデータをログに記録
+
         const updatedOrder = await orderService.updateOrder(orderId, orderData);
+
         if (!updatedOrder) {
+            console.error('Order not found:', orderId); // エラー詳細をログに記録
             return res.status(404).json({ error: 'Order not found' });
         }
+
+        console.log('Order updated successfully:', updatedOrder); // 成功時の詳細をログに記録
         res.json(updatedOrder);
     } catch (error) {
-        console.error('Update Order Error:', error); // デバッグ用に追加
+        console.error('Update Order Error:', error); // エラー詳細をログに記録
         res.status(500).json({ error: error.message });
     }
 };

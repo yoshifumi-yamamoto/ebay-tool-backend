@@ -243,13 +243,32 @@ async function fetchRelevantOrders(userId) {
 
 // 注文データの更新
 async function updateOrder(orderId, orderData) {
-    const { data, error } = await supabase
-        .from('orders')
-        .update(orderData)
-        .eq('id', orderId)
-        .single(); // .single() を追加して、1つのオブジェクトを返すようにします。
-    if (error) throw new Error('Failed to update order: ' + error.message);
-    return data; // dataは更新された注文のオブジェクトであることを確認してください。
+    try {
+        console.log('Updating order with ID:', orderId); // デバッグ情報を追加
+        console.log('Order data to update:', orderData); // デバッグ情報を追加
+
+        const { data, error } = await supabase
+            .from('orders')
+            .update(orderData)
+            .eq('id', orderId)
+            .select(); // select()を追加して更新後のデータを返すようにする
+
+        if (error) {
+            console.error('Supabase Update Error:', error); // エラー詳細をログに記録
+            throw new Error('Failed to update order: ' + error.message);
+        }
+
+        if (!data || data.length === 0) {
+            console.error('No data returned after update'); // デバッグ情報を追加
+            return null;
+        }
+
+        console.log('Updated order data:', data[0]); // 成功時のデータをログに記録
+        return data[0]; // 配列からオブジェクトを返す
+    } catch (err) {
+        console.error('Update Order Service Error:', err); // エラー詳細をログに記録
+        throw err;
+    }
 };
 
 /**
