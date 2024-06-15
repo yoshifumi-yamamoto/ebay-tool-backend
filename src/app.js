@@ -12,7 +12,7 @@ const accountRoutes = require('./routes/accountRoutes');
 const authRoutes = require('./routes/authRoutes');
 const sheetsRoutes = require('./routes/sheetsRoutes');
 const chatworkRoutes = require('./routes/chatworkRoutes');
-// const inventoryRoutes = require('./routes/inventoryRoutes');
+const inventoryRoutes = require('./routes/inventoryRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 
 // 許可するオリジンのリスト
@@ -50,7 +50,7 @@ app.use('/api/accounts', accountRoutes);
 app.use('/api/auth', authRoutes);
 app.use("/api/sheets", sheetsRoutes);
 app.use("/api/chatwork", chatworkRoutes);
-// app.use('/api/inventory', inventoryRoutes);
+app.use('/api/inventory', inventoryRoutes);
 app.use('/api/tasks', taskRoutes);
 
 module.exports = app;
