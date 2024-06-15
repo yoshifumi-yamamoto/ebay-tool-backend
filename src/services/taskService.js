@@ -1,5 +1,15 @@
 // const { getTaskDetails, updateTaskSettings } = require('./octoparseService');
 const { saveTask, updateTaskCompletion, getTaskByID } = require('../models/taskModel');
+const { getOctoparseTasksByUserId, deleteTaskByID } = require('../models/octoparseTaskModel');
+
+/**
+ * ユーザーIDでOctoparseタスクを取得するサービス関数
+ * @param {string} userId - ユーザーID
+ * @returns {Promise<object>} - 取得したタスクデータ
+ */
+const fetchOctoparseTasks = async (userId) => {
+  return await getOctoparseTasksByUserId(userId);
+};
 
 /**
  * タスクを作成するサービス関数
@@ -11,6 +21,15 @@ const { saveTask, updateTaskCompletion, getTaskByID } = require('../models/taskM
  */
 const createTask = async (userID, ebayUserID, taskID, taskName) => {
   return await saveTask(userID, ebayUserID, taskID, taskName);
+};
+
+/**
+ * タスクIDでタスクを削除するサービス関数
+ * @param {string} taskId - タスクID
+ * @returns {Promise<object>} - 削除されたタスクのデータ
+ */
+const deleteTask = async (taskId) => {
+  return await deleteTaskByID(taskId);
 };
 
 /**
@@ -31,4 +50,4 @@ const findTaskByID = async (taskID) => {
   return await getTaskByID(taskID);
 };
 
-module.exports = { createTask, completeTask, findTaskByID };
+module.exports = { fetchOctoparseTasks, createTask, deleteTask, completeTask, findTaskByID };

@@ -1,4 +1,19 @@
-const { createTask, completeTask, findTaskByID } = require('../services/taskService');
+const { fetchOctoparseTasks, createTask, completeTask, findTaskByID, deleteTask } = require('../services/taskService');
+
+/**
+ * ユーザーIDでOctoparseタスクを取得するコントローラ関数
+ * @param {object} req - リクエストオブジェクト
+ * @param {object} res - レスポンスオブジェクト
+ */
+const getOctoparseTasks = async (req, res) => {
+  const { userId } = req.params;
+  try {
+      const data = await fetchOctoparseTasks(userId);
+      res.status(200).json(data);
+  } catch (error) {
+      res.status(500).send('Error fetching Octoparse tasks');
+  }
+};
 
 /**
  * タスクを保存するコントローラ関数
@@ -12,6 +27,21 @@ const saveTask = async (req, res) => {
     res.status(200).send('Task saved successfully');
   } catch (error) {
     res.status(500).send('Error saving task');
+  }
+};
+
+/**
+ * タスクを削除するコントローラ関数
+ * @param {object} req - リクエストオブジェクト
+ * @param {object} res - レスポンスオブジェクト
+ */
+const deleteTaskByID = async (req, res) => {
+  const { taskId } = req.params;
+  try {
+      const data = await deleteTask(taskId);
+      res.status(200).json(data);
+  } catch (error) {
+      res.status(500).send('Error deleting task');
   }
 };
 
@@ -45,4 +75,4 @@ const getTask = async (req, res) => {
   }
 };
 
-module.exports = { saveTask, markTaskCompleted, getTask };
+module.exports = { getOctoparseTasks, saveTask, deleteTaskByID, markTaskCompleted, getTask };
