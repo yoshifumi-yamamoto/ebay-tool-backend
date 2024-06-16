@@ -14,6 +14,7 @@ const sheetsRoutes = require('./routes/sheetsRoutes');
 const chatworkRoutes = require('./routes/chatworkRoutes');
 const inventoryRoutes = require('./routes/inventoryRoutes');
 const taskRoutes = require('./routes/taskRoutes');
+const octoparseRoutes = require('./routes/octoparseRoutes');
 
 // 許可するオリジンのリスト
 const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.vercel.app'];
@@ -52,5 +53,6 @@ app.use("/api/sheets", sheetsRoutes);
 app.use("/api/chatwork", chatworkRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/tasks', taskRoutes);
+app.use('/api/octoparse', octoparseRoutes); // ルートを追加
 
 module.exports = app;
