@@ -1,9 +1,7 @@
 const axios = require('axios');
-const { getEbayUserToken } = require('./authService');
 const supabase = require('../supabaseClient');
-const { fetchBuyerByEbayId, fetchAllBuyers } = require('./buyerService'); // 必要な関数をインポート
 const { fetchEbayAccountTokens, refreshEbayToken } = require("./accountService")
-const { fetchItemImages, fetchItemImage, fetchItemDetails } = require("./itemService")
+const { fetchItemDetails } = require("./itemService")
 const { upsertBuyer } = require('./buyerService');
 
 async function fetchOrdersFromEbay(refreshToken) {
