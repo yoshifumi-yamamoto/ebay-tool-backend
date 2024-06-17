@@ -1,11 +1,11 @@
-// src/routes/inventoryRoutes.js
 const express = require('express');
-const { getInventoryUpdateHistory } = require('../controllers/inventoryController');
 const router = express.Router();
+const { getInventoryUpdateHistory, updateInventory } = require('../controllers/inventoryController');
 
-/**
- * ユーザーIDで在庫更新履歴を取得するルート
- */
+// 在庫更新履歴の取得ルート
 router.get('/inventory-update-history/:userId', getInventoryUpdateHistory);
+
+// 在庫更新の処理ルート
+router.post('/update', updateInventory);
 
 module.exports = router;

@@ -2,7 +2,7 @@ const supabase = require('../supabaseClient');
 const axios = require('axios');
 require('dotenv').config();
 
-const soldOutPatterns = ["売り切れ", "在庫なし", "売却済み", "sold out", ""]; // 売り切れを表すパターン
+const soldOutPatterns = ["売り切れ", "在庫なし", "売却済み", "sold out", "売れ切り", ""]; // 売り切れを表すパターン
 
 function isSoldOut(stockStatus) {
     return soldOutPatterns.some(pattern => stockStatus.trim() === pattern);
@@ -46,7 +46,6 @@ const fetchMatchingItems = async (octoparseData, ebayUserId) => {
             });
         }
     }
-
     return matchingItems;
 };
 

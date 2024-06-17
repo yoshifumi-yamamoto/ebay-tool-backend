@@ -55,4 +55,5 @@ app.use('/api/inventory', inventoryRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/octoparse', octoparseRoutes); // ルートを追加
 
+
 module.exports = app;

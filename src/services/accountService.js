@@ -96,3 +96,12 @@ exports.refreshEbayToken = async (refreshToken) => {
         throw new Error('Failed to refresh eBay token');
     }
 }
+
+exports.getRefreshTokenByEbayUserId = async (ebayUserId) => {
+    const { data, error } = await supabase
+        .from('accounts')
+        .select('refresh_token')
+        .eq('ebay_user_id', ebayUserId);
+    if (error) throw new Error('Failed to retrieve refresh token: ' + error.message);
+    return data.length ? data[0].refresh_token : null;
+};
