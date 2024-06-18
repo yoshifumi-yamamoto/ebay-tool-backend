@@ -99,9 +99,20 @@ exports.refreshEbayToken = async (refreshToken) => {
 
 exports.getRefreshTokenByEbayUserId = async (ebayUserId) => {
     const { data, error } = await supabase
-        .from('accounts')
-        .select('refresh_token')
-        .eq('ebay_user_id', ebayUserId);
-    if (error) throw new Error('Failed to retrieve refresh token: ' + error.message);
-    return data.length ? data[0].refresh_token : null;
-};
+      .from('accounts')
+      .select('refresh_token')
+      .eq('ebay_user_id', ebayUserId);
+  
+      console.log("ebayUserId",ebayUserId)
+    if (error) {
+        console.log("error getRefreshTokenByEbayUserId")
+      console.error('Failed to fetch eBay account tokens:', error.message);
+      throw error;
+    }
+  
+    if (data.length === 0) {
+      throw new Error('No eBay account tokens found for the given eBay user ID');
+    }
+  
+    return data[0].refresh_token;
+  };

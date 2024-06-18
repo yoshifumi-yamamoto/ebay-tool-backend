@@ -2,29 +2,8 @@ const axios = require('axios');
 const supabase = require('../supabaseClient');
 const { getRefreshTokenByEbayUserId, refreshEbayToken } = require('./accountService');
 const xml2js = require('xml2js');
-const createCsvWriter = require('csv-writer').createObjectCsvWriter;
-const path = require('path');
-const { uploadFileToGoogleDrive } = require('./googleDriveService');
 
-// 日付を付けたファイル名を生成
-const fileName = `inventory_update_results_${new Date().toISOString().split('T')[0]}.csv`;
-
-// CSVライターの設定
-const csvWriter = createCsvWriter({
-    path: path.join(__dirname, fileName),
-    header: [
-        {id: 'itemId', title: 'ItemID'},
-        {id: 'stockUrl', title: 'StockUrl'},
-        {id: 'stockStatus', title: 'StockStatus'},
-        {id: 'quantity', title: 'Quantity'},
-        {id: 'status', title: 'Status'},
-        {id: 'errorCode', title: 'ErrorCode'},
-        {id: 'shortMessage', title: 'ShortMessage'},
-        {id: 'longMessage', title: 'LongMessage'}
-    ]
-});
-
-const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, folderId) => {
+const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, taskId, folderId) => {
     try {
         const refreshToken = await getRefreshTokenByEbayUserId(ebayUserId);
         if (!refreshToken) throw new Error('No refresh token found for eBay user ID: ' + ebayUserId);
@@ -62,8 +41,6 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
                 data: xmlRequest
             });
 
-            console.log('eBay在庫更新レスポンス:', response.data);
-
             const parser = new xml2js.Parser();
             const responseData = await parser.parseStringPromise(response.data);
             const errors = responseData.ReviseInventoryStatusResponse.Errors || [];
@@ -74,20 +51,20 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
                     err.ErrorParameters.some(param => param.Value.includes(itemId))
                 );
 
-
                 if (itemErrors.length > 0) {
+                    console.log(`Errors found for itemId: ${itemId}`, itemErrors);
+
                     for (const error of itemErrors) {
-                        console.log(`Skipping ended item: ${itemId}`);
+                        console.log(`Processing error for item: ${itemId}`);
                         await supabase
                             .from('items')
                             .update({
-                                stock_status: 'ended',
+                                stock_status: 'error',
                                 last_update: new Date().toISOString()
                             })
                             .eq('ebay_item_id', itemId)
                             .eq('user_id', userId);
 
-                        // 結果を追加
                         results.push({
                             itemId: itemId,
                             stockUrl: item.url,
@@ -109,7 +86,6 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
                         .eq('ebay_item_id', itemId)
                         .eq('user_id', userId);
 
-                    // 結果を追加
                     results.push({
                         itemId: itemId,
                         stockUrl: item.url,
@@ -126,13 +102,11 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
             await Promise.all(updatePromises);
         }
 
-        // CSVファイルに書き込む
-        await csvWriter.writeRecords(results);
+        // 結果と成功、失敗のカウントを返す
+        const successCount = results.filter(result => result.status === 'success').length;
+        const failureCount = results.filter(result => result.status === 'error').length;
 
-        // Googleドライブにファイルをアップロード
-        await uploadFileToGoogleDrive(path.join(__dirname, fileName), folderId);
-
-        return true;
+        return { results, successCount, failureCount };
     } catch (error) {
         console.error('eBay在庫更新エラー:', error.response ? error.response.data : error.message);
         throw error;

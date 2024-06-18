@@ -1,11 +1,11 @@
-// src/services/inventoryService.js
 const { getInventoryUpdateHistoryByUserId } = require('../models/inventoryModel');
 const octoparseService = require('./octoparseService');
-const accountService = require('./accountService');
 const itemService = require('./itemService');
 const ebayService = require('./ebayService');
+const { uploadFileToGoogleDrive } = require('./googleDriveService');
 const supabase = require('../supabaseClient');
-
+const path = require('path');
+const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 
 /**
  * 在庫更新履歴をユーザーIDで取得するサービス関数
@@ -13,47 +13,78 @@ const supabase = require('../supabaseClient');
  * @returns {Promise<object>} - 取得した在庫更新履歴
  */
 const fetchInventoryUpdateHistory = async (userId) => {
-  return await getInventoryUpdateHistoryByUserId(userId);
+    return await getInventoryUpdateHistoryByUserId(userId);
 };
 
+// 在庫更新履歴を保存
+const saveInventoryUpdateSummary = async (octoparseTaskId, userId, logFileId, successCount, failureCount) => {
+    try {
+        const { data, error } = await supabase
+            .from('inventory_update_history')
+            .insert([
+                {
+                    octoparse_task_id: octoparseTaskId,
+                    user_id: userId,
+                    log_file_id: logFileId,
+                    success_count: successCount,
+                    failure_count: failureCount,
+                    update_time: new Date().toISOString()
+                }
+            ]);
+
+        if (error) {
+            throw error;
+        }
+        return data;
+    } catch (error) {
+        console.error('Error saving inventory update summary:', error.message);
+        throw error;
+    }
+};
 
 // 在庫更新の主要なロジック
-const processInventoryUpdate = async (userId, ebayUserId, taskId) => {
-  try {
-    // Octoparseのデータを取得
-    const octoparseData = await octoparseService.fetchAllOctoparseData(userId, taskId);
-    console.log('Octoparse data fetched:', octoparseData);
+const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
+    try {
+        // Octoparseのデータを取得
+        const octoparseData = await octoparseService.fetchAllOctoparseData(userId, taskId);
 
-    // eBayアカウントのトークンを取得
-    const ebayToken = await accountService.fetchEbayAccountTokens(ebayUserId);
-    const accessToken = await accountService.refreshEbayToken(ebayToken[0]);
+        // 在庫データを照合して更新
+        const formattedData = await itemService.processDataAndFetchMatchingItems(octoparseData, ebayUserId);
 
-    // 在庫データを照合して更新
-    const formattedData = await itemService.processDataAndFetchMatchingItems(octoparseData, ebayUserId);
-    console.log('Formatted data:', formattedData);
+        // 在庫情報をeBayに送信
+        const { results, successCount, failureCount } = await ebayService.updateEbayInventoryTradingAPI(userId, ebayUserId, formattedData, taskId, folderId);
 
-    // 在庫情報をeBayに送信
-    await ebayService.updateInventoryOnEbay(formattedData, accessToken);
+        // 結果をCSVファイルに保存
+        const fileName = `inventory_update_results_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+        const filePath = path.join(__dirname, fileName);
+        const csvWriter = createCsvWriter({
+            path: filePath,
+            header: [
+                { id: 'itemId', title: 'ItemID' },
+                { id: 'stockUrl', title: 'StockUrl' },
+                { id: 'stockStatus', title: 'StockStatus' },
+                { id: 'quantity', title: 'Quantity' },
+                { id: 'status', title: 'Status' },
+                { id: 'errorCode', title: 'ErrorCode' },
+                { id: 'shortMessage', title: 'ShortMessage' },
+                { id: 'longMessage', title: 'LongMessage' }
+            ]
+        });
+        await csvWriter.writeRecords(results);
 
-    // 更新された在庫情報をSupabaseに保存
-    for (const item of formattedData) {
-      await supabase
-        .from('items')
-        .update({
-          stock_status: item.stockStatus,
-          last_update: new Date().toISOString()
-        })
-        .eq('ebay_item_id', item.itemId)
-        .eq('user_id', userId);
+        // CSVファイルをGoogle Driveにアップロード
+        const logFileId = await uploadFileToGoogleDrive(filePath, folderId);
+
+        // 更新履歴をSupabaseに保存
+        await saveInventoryUpdateSummary(taskId, userId, logFileId, successCount, failureCount);
+
+        console.log('在庫更新が完了しました');
+    } catch (error) {
+        console.error('在庫更新処理中にエラーが発生しました:', error);
     }
-
-    console.log('在庫更新が完了しました');
-  } catch (error) {
-    console.error('在庫更新処理中にエラーが発生しました:', error);
-  }
 };
 
 module.exports = {
-  processInventoryUpdate,
-  fetchInventoryUpdateHistory
+    processInventoryUpdate,
+    fetchInventoryUpdateHistory
 };
