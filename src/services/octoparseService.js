@@ -77,5 +77,16 @@ const updateInventoryManagementFlag = async (taskId, enabled) => {
     return await octoparseTaskModel.updateInventoryManagementFlag(taskId, enabled);
 };
 
+// user_idに紐づくタスクを取得
+const getTasksForUser = async (userId) => {
+  const { data, error } = await supabase
+      .from('octoparse_tasks')
+      .select('task_id, task_name')
+      .eq('user_id', userId);
 
-module.exports = { fetchAllOctoparseData, updateInventoryManagementFlag };
+  if (error) throw error;
+  return data;
+};
+
+
+module.exports = { fetchAllOctoparseData, updateInventoryManagementFlag, getTasksForUser };

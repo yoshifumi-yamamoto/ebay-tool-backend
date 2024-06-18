@@ -1,44 +1,37 @@
-const { createNewSchedule, fetchSchedulesByUserId, modifySchedule, removeSchedule } = require('../services/scheduleService');
+const { saveSchedules, getSchedulesByTaskId } = require('../services/scheduleService');
 
-const addSchedule = async (req, res) => {
+/**
+ * スケジュールを取得するコントローラ関数
+ * @param {object} req - リクエストオブジェクト
+ * @param {object} res - レスポンスオブジェクト
+ */
+const fetchSchedules = async (req, res) => {
+    const { taskId } = req.params;
+    console.log("taskId",taskId)
     try {
-        const schedule = req.body;
-        const data = await createNewSchedule(schedule);
-        res.status(201).json(data);
+        const schedules = await getSchedulesByTaskId(taskId);
+        res.status(200).json(schedules);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).send('Error fetching schedules');
     }
 };
 
-const getSchedules = async (req, res) => {
+/**
+ * スケジュールを保存するコントローラ関数
+ * @param {object} req - リクエストオブジェクト
+ * @param {object} res - レスポンスオブジェクト
+ */
+const saveSchedule = async (req, res) => {
+    const { taskId, days_of_week, time, user_id } = req.body;
+    const scheduleData = { taskId, days_of_week, time };
     try {
-        const { userId } = req.params;
-        const data = await fetchSchedulesByUserId(userId);
-        res.status(200).json(data);
+        const savedSchedules = await saveSchedules(scheduleData, user_id); // user_idを含めてスケジュールデータを保存
+        res.status(200).json(savedSchedules);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error saving schedule:', error); // エラーログを出力
+        res.status(500).send('Error saving schedule');
     }
 };
 
-const updateScheduleById = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const updates = req.body;
-        const data = await modifySchedule(id, updates);
-        res.status(200).json(data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-};
 
-const deleteScheduleById = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const data = await removeSchedule(id);
-        res.status(200).json(data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-};
-
-module.exports = { addSchedule, getSchedules, updateScheduleById, deleteScheduleById };
+module.exports = { fetchSchedules, saveSchedule };

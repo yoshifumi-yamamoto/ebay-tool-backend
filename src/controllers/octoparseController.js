@@ -32,4 +32,15 @@ const updateInventoryManagementFlag = async (req, res) => {
   }
 };
 
-module.exports = { getAllOctoparseData, updateInventoryManagementFlag }
+// user_idに紐づくタスクを取得
+const getTasksByUserId = async (req, res) => {
+  const { userId } = req.params;
+  try {
+      const tasks = await octoparseService.getTasksForUser(userId);
+      res.status(200).json(tasks);
+  } catch (error) {
+      res.status(500).send('Error fetching tasks');
+  }
+};
+
+module.exports = { getAllOctoparseData, updateInventoryManagementFlag, getTasksByUserId }
