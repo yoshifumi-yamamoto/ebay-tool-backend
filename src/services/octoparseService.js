@@ -1,5 +1,6 @@
 const axios = require('axios');
 const supabase = require('../supabaseClient');
+const octoparseTaskModel = require('../models/octoparseTaskModel');
 
 const getOctoparseToken = async (userId) => {
   const { data, error } = await supabase
@@ -71,4 +72,10 @@ const fetchAllOctoparseData = async (userId, taskId) => {
 };
 
 
-module.exports = { fetchAllOctoparseData };
+// 在庫管理フラグを更新するサービス関数
+const updateInventoryManagementFlag = async (taskId, enabled) => {
+    return await octoparseTaskModel.updateInventoryManagementFlag(taskId, enabled);
+};
+
+
+module.exports = { fetchAllOctoparseData, updateInventoryManagementFlag };

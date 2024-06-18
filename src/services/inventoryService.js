@@ -17,7 +17,7 @@ const fetchInventoryUpdateHistory = async (userId) => {
 };
 
 // 在庫更新履歴を保存
-const saveInventoryUpdateSummary = async (octoparseTaskId, userId, logFileId, successCount, failureCount) => {
+const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, logFileId, successCount, failureCount) => {
     try {
         const { data, error } = await supabase
             .from('inventory_update_history')
@@ -25,6 +25,7 @@ const saveInventoryUpdateSummary = async (octoparseTaskId, userId, logFileId, su
                 {
                     octoparse_task_id: octoparseTaskId,
                     user_id: userId,
+                    ebay_user_id: ebayUserId,
                     log_file_id: logFileId,
                     success_count: successCount,
                     failure_count: failureCount,
@@ -76,7 +77,7 @@ const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
         const logFileId = await uploadFileToGoogleDrive(filePath, folderId);
 
         // 更新履歴をSupabaseに保存
-        await saveInventoryUpdateSummary(taskId, userId, logFileId, successCount, failureCount);
+        await saveInventoryUpdateSummary(taskId, userId, ebayUserId, logFileId, successCount, failureCount);
 
         console.log('在庫更新が完了しました');
     } catch (error) {

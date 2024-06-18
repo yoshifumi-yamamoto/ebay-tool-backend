@@ -21,13 +21,29 @@ const getOctoparseTasksByUserId = async (userId) => {
  * @returns {Promise<object>} - 削除されたタスクデータ
  */
 const deleteTaskByID = async (taskId) => {
-  const { data, error } = await supabase
-      .from('octoparse_tasks')
-      .delete()
-      .eq('id', taskId);
+    const { data, error } = await supabase
+        .from('octoparse_tasks')
+        .delete()
+        .eq('id', taskId);
 
-  if (error) throw error;
-  return data;
+    if (error) throw error;
+    return data;
 };
 
-module.exports = { getOctoparseTasksByUserId, deleteTaskByID };
+/**
+ * 在庫管理フラグを更新する関数
+ * @param {string} taskId - タスクID
+ * @param {boolean} enabled - 在庫管理を有効にするかどうかのフラグ
+ * @returns {Promise<object>} - 更新されたタスクデータ
+ */
+const updateInventoryManagementFlag = async (taskId, enabled) => {
+    const { data, error } = await supabase
+        .from('octoparse_tasks')
+        .update({ inventory_management_enabled: enabled })
+        .eq('id', taskId);
+
+    if (error) throw error;
+    return data;
+};
+
+module.exports = { getOctoparseTasksByUserId, deleteTaskByID, updateInventoryManagementFlag };
