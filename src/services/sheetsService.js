@@ -31,14 +31,33 @@ async function readFromSheet(spreadsheetId, range) {
     }
 }
 
-async function saveItems(items) {
+async function saveItems(items, userId) {
     try {
         const uniqueItems = Array.from(new Set(items.map(item => item.ebay_item_id)))
-            .map(ebay_item_id => items.find(item => item.ebay_item_id === ebay_item_id));
-        
+            .map(ebay_item_id => {
+                const item = items.find(i => i.ebay_item_id === ebay_item_id);
+                return {
+                    ...item,
+                    user_id: userId  // userIdを追加
+                };
+            });
+
         const { data, error } = await supabase
             .from('items')
-            .upsert(uniqueItems, { onConflict: ['ebay_item_id'], updateColumns: ['title', 'stocking_url', 'cost_price', 'shipping_cost', 'researcher', 'exhibitor', 'exhibit_date', 'research_date', 'ebay_user_id'] });
+            .upsert(uniqueItems, {
+                onConflict: ['ebay_item_id', 'user_id'], // user_idも衝突対象に追加
+                updateColumns: [
+                    'title', 
+                    'stocking_url', 
+                    'cost_price', 
+                    'shipping_cost', 
+                    'researcher', 
+                    'exhibitor', 
+                    'exhibit_date', 
+                    'research_date', 
+                    'ebay_user_id'
+                ]
+            });
 
         if (error) {
             throw error;

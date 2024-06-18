@@ -84,7 +84,7 @@ async function syncSheetToSupabase(req, res) {
                     };
                 });
 
-            await saveItems(itemsFromSheet);
+            await saveItems(itemsFromSheet, userId);
         }
         res.status(200).send('Items successfully saved to Supabase');
     } catch (error) {

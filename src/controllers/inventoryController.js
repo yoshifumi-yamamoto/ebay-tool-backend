@@ -25,7 +25,7 @@ const getInventoryUpdateHistory = async (req, res) => {
  * @param {object} res - レスポンスオブジェクト
  */
 const updateInventory = async (req, res) => {
-  const { userId, ebayUserId, taskId } = req.body;
+  const { userId, ebayUserId, taskId, folderId } = req.body;
   
   try {
     // Octoparseデータの取得と整形
@@ -33,7 +33,7 @@ const updateInventory = async (req, res) => {
     const matchingItems = await processDataAndFetchMatchingItems(octoparseData, ebayUserId);
 
     // 在庫更新のためのeBay API呼び出し
-    await updateEbayInventoryTradingAPI(userId, ebayUserId,matchingItems);
+    await updateEbayInventoryTradingAPI(userId, ebayUserId, matchingItems, folderId);
 
     res.status(200).send('Inventory updated successfully');
   } catch (error) {

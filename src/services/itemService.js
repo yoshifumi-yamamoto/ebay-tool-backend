@@ -15,7 +15,8 @@ function formatForEbayAPI(octoparseData, matchingItems) {
         return {
             itemId: itemId, // eBayのSKUを設定
             quantity: quantity,
-            url: data.URL
+            url: data.URL,
+            stockStatus: data["在庫"]
         };
     });
 }
