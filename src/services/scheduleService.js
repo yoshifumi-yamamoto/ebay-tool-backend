@@ -2,12 +2,10 @@ const supabase = require('../supabaseClient');
 
 const saveSchedules = async (scheduleData, userId) => {
     try {
-        console.log("scheduleData", scheduleData)
         const { taskId, days_of_week, time } = scheduleData;
         const enabled = true; // 初期状態を有効に設定
 
         if (!days_of_week || !Array.isArray(days_of_week)) {
-            console.error('Invalid days_of_week value:', days_of_week); // デバッグログ
             throw new Error('Invalid days_of_week value. It should be a non-null array.');
         }
 
@@ -42,23 +40,18 @@ const saveSchedules = async (scheduleData, userId) => {
     }
 };
 
-
-
 const getSchedulesByTaskId = async (taskId) => {
-    console.log("getSchedulesByTaskId taskId", taskId);
 
     // スケジュールを取得
     const { data: schedules, error: schedulesError } = await supabase
         .from('inventory_management_schedules')
-        .select('*, octoparse_tasks!inner(task_name)')
+        .select('*, octoparse_tasks(task_name)')
         .eq('task_id', taskId);
 
     if (schedulesError) {
         console.error("Error fetching schedules:", schedulesError);
         throw schedulesError;
     }
-
-    console.log("Fetched schedules:", schedules);
 
     let taskName = '';
 
@@ -67,16 +60,13 @@ const getSchedulesByTaskId = async (taskId) => {
         const { data: task, error: taskError } = await supabase
             .from('octoparse_tasks')
             .select('task_name')
-            .eq('id', taskId)
-            .single();
+            .eq('task_id', taskId);
 
-        if (taskError) {
-            console.error("Error fetching task:", taskError);
-            throw taskError;
+        if (taskError || task.length === 0) {
+            console.error("Error fetching task:", taskError || 'Task not found');
+            return { task_name: '', schedules: [] }; // エラーを投げずに空のスケジュールを返す
         }
-
-        console.log("Fetched task:", task);
-        taskName = task.task_name;
+        taskName = task[0].task_name;
     } else {
         taskName = schedules[0].octoparse_tasks.task_name;
     }
@@ -84,12 +74,6 @@ const getSchedulesByTaskId = async (taskId) => {
     return { task_name: taskName, schedules };
 };
 
-/**
- * スケジュールのステータスを更新するサービス関数
- * @param {string} taskId - タスクID
- * @param {boolean} enabled - 新しいステータス
- * @returns {Promise<void>} - 更新結果
- */
 const updateStatus = async (taskId, enabled) => {
     try {
         const { error } = await supabase
@@ -106,6 +90,13 @@ const updateStatus = async (taskId, enabled) => {
     }
 };
 
+const getAllSchedules = async () => {
+    const { data, error } = await supabase
+        .from('inventory_management_schedules')
+        .select('*');
 
+    if (error) throw error;
+    return data;
+};
 
-module.exports = { saveSchedules, getSchedulesByTaskId, updateStatus };
+module.exports = { saveSchedules, getSchedulesByTaskId, updateStatus, getAllSchedules };
