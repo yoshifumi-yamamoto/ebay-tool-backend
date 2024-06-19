@@ -14,8 +14,9 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
         const results = [];  // 結果を格納する配列
 
         for (let i = 0; i < inventoryData.length; i += batchSize) {
-            const batch = inventoryData.slice(i, i + batchSize);
+            const batch = inventoryData.slice(i, i + batchSize).filter(item => item !== undefined);
 
+            console.log("batch", batch);
             const xmlRequest = `
                 <?xml version="1.0" encoding="utf-8"?>
                 <ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">
@@ -44,11 +45,14 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
             const parser = new xml2js.Parser();
             const responseData = await parser.parseStringPromise(response.data);
             const errors = responseData.ReviseInventoryStatusResponse.Errors || [];
+            console.log("Batch processed: ", batch);
+            console.log("Errors received: ", errors);
 
             const updatePromises = batch.map(async item => {
                 const itemId = item.itemId;
+                console.log("Processing item: ", item);
                 const itemErrors = errors.filter(err => 
-                    err.ErrorParameters.some(param => param.Value.includes(itemId))
+                    err.ErrorParameters && err.ErrorParameters.some(param => param.Value.includes(itemId))
                 );
 
                 if (itemErrors.length > 0) {
@@ -100,6 +104,20 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
             });
 
             await Promise.all(updatePromises);
+
+            // `undefined` なアイテムをエラーとして追加
+            inventoryData.slice(i, i + batchSize).filter(item => item === undefined).forEach(item => {
+                results.push({
+                    itemId: "",
+                    stockUrl: item.url,
+                    stockStatus: item.stockStatus,
+                    quantity: 0,
+                    status: 'error',
+                    errorCode: 999,
+                    shortMessage: "item does not match",
+                    longMessage: "No matching itemId found"
+                });
+            });
         }
 
         // 結果と成功、失敗のカウントを返す
@@ -112,6 +130,7 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
         throw error;
     }
 };
+
 
 module.exports = {
     updateEbayInventoryTradingAPI

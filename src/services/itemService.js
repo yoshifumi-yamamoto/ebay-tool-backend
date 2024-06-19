@@ -11,15 +11,31 @@ function isSoldOut(stockStatus) {
 function formatForEbayAPI(octoparseData, matchingItems) {
     return octoparseData.map((data) => {
         const quantity = isSoldOut(data["在庫"]) ? 0 : parseInt(data["在庫"], 10) || 1; // 数量が空の場合に1をデフォルト設定
-        const itemId = matchingItems[data.URL]; // URLをキーにして一致するitemIdを取得
+        const itemId = matchingItems[data.URL] || matchingItems[data["店铺URL"]]; // URLをキーにして一致するitemIdを取得
+
+        if (!itemId) {
+            console.error(`No matching itemId found for URL: ${data.URL} or 店铺URL: ${data["店铺URL"]}`);
+            return {
+                itemId: "", // itemIdが見つからない場合は空文字
+                quantity: quantity,
+                url: data.URL || data["店铺URL"],
+                stockStatus: data["在庫"],
+                status: "error",
+                errorCode: 999,
+                shortMessage: "item does not match",
+                longMessage: "No matching itemId found"
+            };
+        }
+
         return {
             itemId: itemId, // eBayのSKUを設定
             quantity: quantity,
-            url: data.URL,
+            url: data.URL || data["店铺URL"],
             stockStatus: data["在庫"]
         };
     });
 }
+
 
 const fetchMatchingItems = async (octoparseData, ebayUserId) => {
     const batchSize = 100; // 一度に処理するバッチのサイズ
@@ -28,7 +44,7 @@ const fetchMatchingItems = async (octoparseData, ebayUserId) => {
 
     for (let i = 0; i < octoparseData.length; i += batchSize) {
         const batch = octoparseData.slice(i, i + batchSize);
-        const urls = batch.map(data => data.URL);
+        const urls = batch.map(data => data.URL || data["店铺URL"]);
 
         const { data: items, error } = await supabase
             .from('items')
@@ -42,9 +58,7 @@ const fetchMatchingItems = async (octoparseData, ebayUserId) => {
         }
 
         if (items.length > 0) {
-            items.forEach(item => {
-                matchingItems[item.stocking_url] = item.ebay_item_id;
-            });
+            items.forEach(item => {matchingItems[item.stocking_url] = item.ebay_item_id;});
         }
     }
     return matchingItems;
