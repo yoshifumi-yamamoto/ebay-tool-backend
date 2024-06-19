@@ -5,6 +5,7 @@ const ebayService = require('./ebayService');
 const { uploadFileToGoogleDrive } = require('./googleDriveService');
 const supabase = require('../supabaseClient');
 const path = require('path');
+const fs = require('fs'); // ファイルシステムモジュールを追加
 const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 
 /**
@@ -75,6 +76,15 @@ const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
 
         // CSVファイルをGoogle Driveにアップロード
         const logFileId = await uploadFileToGoogleDrive(filePath, folderId);
+
+        // ファイルアップロード後にローカルファイルを削除
+        fs.unlink(filePath, (err) => {
+            if (err) {
+                console.error('Error deleting CSV file:', err.message);
+            } else {
+                console.log('CSV file deleted successfully');
+            }
+        });
 
         // 更新履歴をSupabaseに保存
         await saveInventoryUpdateSummary(taskId, userId, ebayUserId, logFileId, successCount, failureCount);
