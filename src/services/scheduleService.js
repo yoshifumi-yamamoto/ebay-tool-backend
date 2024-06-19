@@ -91,12 +91,23 @@ const updateStatus = async (taskId, enabled) => {
 };
 
 const getAllSchedules = async () => {
-    const { data, error } = await supabase
+    const { data: schedules, error: schedulesError } = await supabase
         .from('inventory_management_schedules')
-        .select('*');
+        .select('*, octoparse_tasks(ebay_user_id)')
+        .eq('enabled', true); // enabledがtrueのスケジュールのみを取得
 
-    if (error) throw error;
-    return data;
+    if (schedulesError) throw schedulesError;
+    
+    // ebay_user_idを各スケジュールに追加
+    const updatedSchedules = schedules.map(schedule => ({
+        ...schedule,
+        ebay_user_id: schedule.octoparse_tasks.ebay_user_id,
+        task_name: schedule.octoparse_tasks.task_name // 必要に応じて他のフィールドも追加
+    }));
+
+    return updatedSchedules;
 };
+
+
 
 module.exports = { saveSchedules, getSchedulesByTaskId, updateStatus, getAllSchedules };

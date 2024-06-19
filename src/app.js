@@ -3,6 +3,7 @@ const express = require('express');
 const app = express();
 
 const cors = require('cors');
+require('dotenv').config();
 
 // ルートのインポート
 const userRoutes = require('./routes/userRoutes');
@@ -16,6 +17,9 @@ const inventoryRoutes = require('./routes/inventoryRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 const octoparseRoutes = require('./routes/octoparseRoutes');
 const scheduleRoutes = require('./routes/scheduleRoutes');
+
+// スケジューラのインポート
+const { scheduleInventoryUpdates } = require('./scheduler');
 
 // 許可するオリジンのリスト
 const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.vercel.app'];
@@ -57,5 +61,9 @@ app.use('/api/tasks', taskRoutes);
 app.use('/api/octoparse', octoparseRoutes); 
 app.use('/api/schedule', scheduleRoutes);
 
+// スケジューラを環境変数に基づいて起動
+if (process.env.ENABLE_SCHEDULER === 'true') {
+  scheduleInventoryUpdates();
+}
 
 module.exports = app;
