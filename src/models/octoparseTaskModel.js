@@ -8,9 +8,15 @@ const supabase = require('../supabaseClient');
 const getOctoparseTasksByUserId = async (userId) => {
     const { data, error } = await supabase
         .from('octoparse_tasks')
-        .select('*')
+        .select(`
+            *,
+            inventory_management_schedules (
+                days_of_week,
+                time_of_day,
+                enabled
+            )
+        `)
         .eq('user_id', userId);
-
     if (error) throw error;
     return data;
 };

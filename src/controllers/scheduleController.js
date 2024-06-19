@@ -1,4 +1,4 @@
-const { saveSchedules, getSchedulesByTaskId } = require('../services/scheduleService');
+const { saveSchedules, getSchedulesByTaskId, updateStatus } = require('../services/scheduleService');
 
 /**
  * スケジュールを取得するコントローラ関数
@@ -7,7 +7,6 @@ const { saveSchedules, getSchedulesByTaskId } = require('../services/scheduleSer
  */
 const fetchSchedules = async (req, res) => {
     const { taskId } = req.params;
-    console.log("taskId",taskId)
     try {
         const schedules = await getSchedulesByTaskId(taskId);
         res.status(200).json(schedules);
@@ -33,5 +32,20 @@ const saveSchedule = async (req, res) => {
     }
 };
 
+/**
+ * スケジュールのステータスを更新するコントローラ関数
+ * @param {object} req - リクエストオブジェクト
+ * @param {object} res - レスポンスオブジェクト
+ */
+const updateScheduleStatus = async (req, res) => {
+    const { taskId } = req.params;
+    const { enabled } = req.body; // リクエストボディからステータスを取得
+    try {
+        await updateStatus(taskId, enabled);
+        res.status(200).send('Status updated successfully');
+    } catch (error) {
+        res.status(500).send('Error updating status');
+    }
+};
 
-module.exports = { fetchSchedules, saveSchedule };
+module.exports = { fetchSchedules, saveSchedule, updateScheduleStatus };

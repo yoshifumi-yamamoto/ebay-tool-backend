@@ -84,6 +84,28 @@ const getSchedulesByTaskId = async (taskId) => {
     return { task_name: taskName, schedules };
 };
 
+/**
+ * スケジュールのステータスを更新するサービス関数
+ * @param {string} taskId - タスクID
+ * @param {boolean} enabled - 新しいステータス
+ * @returns {Promise<void>} - 更新結果
+ */
+const updateStatus = async (taskId, enabled) => {
+    try {
+        const { error } = await supabase
+            .from('inventory_management_schedules')
+            .update({ enabled })
+            .eq('task_id', taskId);
+
+        if (error) {
+            throw error;
+        }
+    } catch (error) {
+        console.error('Error updating schedule status:', error.message);
+        throw error;
+    }
+};
 
 
-module.exports = { saveSchedules, getSchedulesByTaskId };
+
+module.exports = { saveSchedules, getSchedulesByTaskId, updateStatus };
