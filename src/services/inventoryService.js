@@ -18,7 +18,7 @@ const fetchInventoryUpdateHistory = async (userId) => {
 };
 
 // 在庫更新履歴を保存
-const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, logFileId, successCount, failureCount) => {
+const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, logFileId = '', successCount = 0, failureCount = 0, errorMessage = '') => {
     try {
         const { data, error } = await supabase
             .from('inventory_update_history')
@@ -30,7 +30,8 @@ const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, l
                     log_file_id: logFileId,
                     success_count: successCount,
                     failure_count: failureCount,
-                    update_time: new Date().toISOString()
+                    update_time: new Date().toISOString(),
+                    error_message: errorMessage
                 }
             ]);
 
@@ -43,6 +44,7 @@ const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, l
         throw error;
     }
 };
+
 
 // 在庫更新の主要なロジック
 const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
@@ -77,23 +79,20 @@ const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
         // CSVファイルをGoogle Driveにアップロード
         const logFileId = await uploadFileToGoogleDrive(filePath, folderId);
 
-        // ファイルアップロード後にローカルファイルを削除
-        fs.unlink(filePath, (err) => {
-            if (err) {
-                console.error('Error deleting CSV file:', err.message);
-            } else {
-                console.log('CSV file deleted successfully');
-            }
-        });
-
         // 更新履歴をSupabaseに保存
         await saveInventoryUpdateSummary(taskId, userId, ebayUserId, logFileId, successCount, failureCount);
 
         console.log('在庫更新が完了しました');
+
+        // CSVファイルを削除
+        fs.unlinkSync(filePath);
     } catch (error) {
         console.error('在庫更新処理中にエラーが発生しました:', error);
+        // エラーログを保存
+        await saveInventoryUpdateSummary(taskId, userId, ebayUserId, '', 0, 0, error.message);
     }
 };
+
 
 module.exports = {
     processInventoryUpdate,
