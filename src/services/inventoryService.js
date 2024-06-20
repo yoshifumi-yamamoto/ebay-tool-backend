@@ -20,6 +20,13 @@ const fetchInventoryUpdateHistory = async (userId) => {
 // 在庫更新履歴を保存
 const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, logFileId = '', successCount = 0, failureCount = 0, errorMessage = '') => {
     try {
+        // 現在の日時を取得
+        const now = new Date();
+        // JSTに変換（UTCに9時間を追加）
+        const jstDate = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+        // ISO 8601形式の文字列を取得
+        const jstISOString = jstDate.toISOString().replace('Z', '+09:00');
+
         const { data, error } = await supabase
             .from('inventory_update_history')
             .insert([
@@ -30,7 +37,7 @@ const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, l
                     log_file_id: logFileId,
                     success_count: successCount,
                     failure_count: failureCount,
-                    update_time: new Date().toISOString(),
+                    update_time: jstISOString,
                     error_message: errorMessage
                 }
             ]);
