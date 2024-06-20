@@ -71,6 +71,39 @@ const fetchAllOctoparseData = async (userId, taskId) => {
   return allData;
 };
 
+// Octoparseのデータを削除する関数
+const deleteOctoparseData = async (userId, taskId) => {
+  let { access_token, refresh_token } = await getOctoparseToken(userId);
+
+  try {
+    const response = await axios.post('https://openapi.octoparse.com/data/remove', {
+      taskId
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${access_token}`
+      }
+    });
+
+    if (response.data && response.data.code === 0) {
+      console.log('Data successfully deleted from Octoparse.');
+    } else {
+      console.error('Failed to delete data from Octoparse:', response.data);
+    }
+  } catch (error) {
+    if (error.response && error.response.status === 401) {
+      access_token = await refreshOctoparseToken(refresh_token);
+      await supabase
+        .from('octoparse_accounts')
+        .update({ access_token })
+        .eq('user_id', userId);
+      await deleteOctoparseData(userId, taskId);  // トークン更新後に再試行
+    } else {
+      throw new Error(`Error deleting data from Octoparse: ${error.message}`);
+    }
+  }
+};
+
 
 // 在庫管理フラグを更新するサービス関数
 const updateInventoryManagementFlag = async (taskId, enabled) => {
@@ -89,4 +122,4 @@ const getTasksForUser = async (userId) => {
 };
 
 
-module.exports = { fetchAllOctoparseData, updateInventoryManagementFlag, getTasksForUser };
+module.exports = { fetchAllOctoparseData, updateInventoryManagementFlag, getTasksForUser, deleteOctoparseData };

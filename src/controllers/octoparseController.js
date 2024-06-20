@@ -43,4 +43,16 @@ const getTasksByUserId = async (req, res) => {
   }
 };
 
-module.exports = { getAllOctoparseData, updateInventoryManagementFlag, getTasksByUserId }
+const deleteOctoparseData = async (req, res) => {
+  const { userId, taskId } = req.body;
+
+  try {
+    await octoparseService.deleteOctoparseData(userId, taskId);
+    res.status(200).send('Data successfully deleted from Octoparse.');
+  } catch (error) {
+    console.error('Error deleting data from Octoparse:', error.message);
+    res.status(500).send('Error deleting data from Octoparse.');
+  }
+};
+
+module.exports = { getAllOctoparseData, updateInventoryManagementFlag, getTasksByUserId, deleteOctoparseData }

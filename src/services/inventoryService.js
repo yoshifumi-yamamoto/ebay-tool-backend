@@ -18,7 +18,7 @@ const fetchInventoryUpdateHistory = async (userId) => {
 };
 
 // 在庫更新履歴を保存
-const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, logFileId = '', successCount = 0, failureCount = 0, errorMessage = '') => {
+const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, logFileId = '', successCount = 0, failureCount = 0, errorMessage = '', taskDeleteStatus = false) => {
     try {
         // 現在の日時を取得
         const now = new Date();
@@ -38,7 +38,8 @@ const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, l
                     success_count: successCount,
                     failure_count: failureCount,
                     update_time: jstISOString,
-                    error_message: errorMessage
+                    error_message: errorMessage,
+                    task_delete_status: taskDeleteStatus
                 }
             ]);
 
@@ -51,7 +52,6 @@ const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, l
         throw error;
     }
 };
-
 
 // 在庫更新の主要なロジック
 const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
@@ -86,8 +86,25 @@ const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
         // CSVファイルをGoogle Driveにアップロード
         const logFileId = await uploadFileToGoogleDrive(filePath, folderId);
 
+        // task_delete_flgのチェック
+        const { data: schedules, error } = await supabase
+            .from('inventory_management_schedules')
+            .select('task_delete_flg')
+            .eq('task_id', taskId)
+            .single();
+
+        if (error) {
+            throw error;
+        }
+
+        let taskDeleteStatus = false;
+        if (schedules.task_delete_flg) {
+            await octoparseService.deleteOctoparseData(userId, taskId);
+            taskDeleteStatus = true;
+        }
+
         // 更新履歴をSupabaseに保存
-        await saveInventoryUpdateSummary(taskId, userId, ebayUserId, logFileId, successCount, failureCount);
+        await saveInventoryUpdateSummary(taskId, userId, ebayUserId, logFileId, successCount, failureCount, '', taskDeleteStatus);
 
         console.log('在庫更新が完了しました');
 
@@ -96,10 +113,9 @@ const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
     } catch (error) {
         console.error('在庫更新処理中にエラーが発生しました:', error);
         // エラーログを保存
-        await saveInventoryUpdateSummary(taskId, userId, ebayUserId, '', 0, 0, error.message);
+        await saveInventoryUpdateSummary(taskId, userId, ebayUserId, '', 0, 0, error.message, false);
     }
 };
-
 
 module.exports = {
     processInventoryUpdate,
