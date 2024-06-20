@@ -63,7 +63,8 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
                         await supabase
                             .from('items')
                             .update({
-                                stock_status: 'error',
+                                stock_status: item.stockStatus,
+                                item_status: error.ErrorCode[0],
                                 last_update: new Date().toISOString()
                             })
                             .eq('ebay_item_id', itemId)
@@ -85,6 +86,7 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
                         .from('items')
                         .update({
                             stock_status: item.stockStatus,
+                            item_status: "ACTIVE",
                             last_update: new Date().toISOString()
                         })
                         .eq('ebay_item_id', itemId)

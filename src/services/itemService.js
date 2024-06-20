@@ -23,7 +23,7 @@ function formatForEbayAPI(octoparseData, matchingItems) {
                 status: "error",
                 errorCode: 999,
                 shortMessage: "item does not match",
-                longMessage: "No matching itemId found"
+                longMessage: "No matching itemId found",
             };
         }
 
@@ -31,7 +31,9 @@ function formatForEbayAPI(octoparseData, matchingItems) {
             itemId: itemId, // eBayのSKUを設定
             quantity: quantity,
             url: data.URL || data["店铺URL"],
-            stockStatus: data["在庫"]
+            stockStatus: data["在庫"],
+            itemStatus: "",
+            errorCode: "",
         };
     });
 }
