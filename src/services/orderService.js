@@ -245,9 +245,18 @@ async function updateOrder(orderId, orderData) {
         console.log('Updating order with ID:', orderId); // デバッグ情報を追加
         console.log('Order data to update:', orderData); // デバッグ情報を追加
 
+        const updates = {};
+
+        // 動的に更新フィールドを設定
+        for (const key in orderData) {
+            if (orderData.hasOwnProperty(key)) {
+                updates[key] = orderData[key];
+            }
+        }
+
         const { data, error } = await supabase
             .from('orders')
-            .update(orderData)
+            .update(updates)
             .eq('id', orderId)
             .select(); // select()を追加して更新後のデータを返すようにする
 
