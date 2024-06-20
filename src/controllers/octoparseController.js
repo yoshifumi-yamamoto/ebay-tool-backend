@@ -1,3 +1,4 @@
+// controllers/octoparseController.js
 const octoparseService = require('../services/octoparseService');
 const { processDataAndFetchMatchingItems } = require('../services/itemService');
 
@@ -19,7 +20,7 @@ const getAllOctoparseData = async (req, res) => {
   }
 }
 
-  // 在庫管理フラグを更新するコントローラ関数
+// 在庫管理フラグを更新するコントローラ関数
 const updateInventoryManagementFlag = async (req, res) => {
   const { taskId, enabled } = req.body;
 
@@ -55,4 +56,17 @@ const deleteOctoparseData = async (req, res) => {
   }
 };
 
-module.exports = { getAllOctoparseData, updateInventoryManagementFlag, getTasksByUserId, deleteOctoparseData }
+// task_delete_flgを更新するコントローラ関数
+const updateTaskDeleteFlag = async (req, res) => {
+  const { taskId, task_delete_flg } = req.body;
+
+  try {
+    await octoparseService.updateTaskDeleteFlag(taskId, task_delete_flg);
+    res.status(200).send('Task delete flag updated successfully');
+  } catch (error) {
+    console.error('Error updating task delete flag:', error.message);
+    res.status(500).send('Error updating task delete flag');
+  }
+};
+
+module.exports = { getAllOctoparseData, updateInventoryManagementFlag, getTasksByUserId, deleteOctoparseData, updateTaskDeleteFlag }

@@ -13,7 +13,8 @@ const getOctoparseTasksByUserId = async (userId) => {
             inventory_management_schedules (
                 days_of_week,
                 time_of_day,
-                enabled
+                enabled,
+                task_delete_flg
             )
         `)
         .eq('user_id', userId);

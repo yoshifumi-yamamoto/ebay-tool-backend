@@ -121,5 +121,22 @@ const getTasksForUser = async (userId) => {
   return data;
 };
 
+// task_delete_flgを更新する関数
+const updateTaskDeleteFlag = async (taskId, deleteFlag) => {
+  try {
+    const { data, error } = await supabase
+      .from('inventory_management_schedules')
+      .update({ task_delete_flg: deleteFlag })
+      .eq('task_id', taskId);
 
-module.exports = { fetchAllOctoparseData, updateInventoryManagementFlag, getTasksForUser, deleteOctoparseData };
+    if (error) {
+      throw error;
+    }
+    return data;
+  } catch (error) {
+    console.error('Error updating task_delete_flg:', error.message);
+    throw error;
+  }
+};
+
+module.exports = { fetchAllOctoparseData, updateInventoryManagementFlag, getTasksForUser, deleteOctoparseData, updateTaskDeleteFlag };
