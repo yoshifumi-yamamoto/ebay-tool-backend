@@ -16,7 +16,7 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
         for (let i = 0; i < inventoryData.length; i += batchSize) {
             const batch = inventoryData.slice(i, i + batchSize).filter(item => item !== undefined);
 
-            console.log("batch", batch);
+            // console.log("batch", batch);
             const xmlRequest = `
                 <?xml version="1.0" encoding="utf-8"?>
                 <ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">
@@ -45,8 +45,7 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
             const parser = new xml2js.Parser();
             const responseData = await parser.parseStringPromise(response.data);
             const errors = responseData.ReviseInventoryStatusResponse.Errors || [];
-            console.log("Batch processed: ", batch);
-            console.log("Errors received: ", errors);
+            // console.log("Errors received: ", errors);
 
             const updatePromises = batch.map(async item => {
                 const itemId = item.itemId;
@@ -59,7 +58,7 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
                     console.log(`Errors found for itemId: ${itemId}`, itemErrors);
 
                     for (const error of itemErrors) {
-                        console.log(`Processing error for item: ${itemId}`);
+                        // console.log(`Processing error for item: ${itemId}`);
                         await supabase
                             .from('items')
                             .update({
@@ -82,6 +81,7 @@ const updateEbayInventoryTradingAPI = async (userId, ebayUserId, inventoryData, 
                         });
                     }
                 } else {
+                    console.log(`Success for item: ${itemId}`);
                     await supabase
                         .from('items')
                         .update({
