@@ -56,6 +56,7 @@ const saveInventoryUpdateSummary = async (octoparseTaskId, userId, ebayUserId, l
 // 在庫更新の主要なロジック
 const processInventoryUpdate = async (userId, ebayUserId, taskId, folderId) => {
     try {
+        console.log("processInventoryUpdate")
         // Octoparseのデータを取得
         const octoparseData = await octoparseService.fetchAllOctoparseData(userId, taskId);
 
