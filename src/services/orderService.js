@@ -81,7 +81,7 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
  * @param {string} lineItemFulfillmentStatus - ラインアイテムの履行状況
  * @returns {Object} - 更新された注文データ
  */
-async function updateOrderInSupabase(order, buyerId, userId, lineItems, shippingCost, lineItemFulfillmentStatus) {
+async function updateOrderInSupabase(order, buyerId, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher) {
     // 注文収益を計算する
     const earningsAfterPlFee = order.paymentSummary.totalDueSeller.value * 0.979; // 注文収益 - プロモーテッドリスティングス(2.1%)
 
@@ -118,7 +118,8 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         subtotal: order.pricingSummary.priceSubtotal.value,
         earnings: order.paymentSummary.totalDueSeller.value, // 注文収益
         earnings_after_pl_fee: earningsAfterPlFee,
-        shipping_cost: existingData ? existingData.shipping_cost : shippingCost // 更新しない
+        shipping_cost: existingData ? existingData.shipping_cost : shippingCost, // 更新しない
+        researcher: existingData ? existingData.researcher : researcher
     };
 
     // Supabaseにデータを保存
@@ -193,7 +194,9 @@ async function saveOrdersAndBuyers(userId) {
 
                     const shippingCost = itemsMap[lineItems[0].legacyItemId]?.shipping_cost || 0
 
-                    await updateOrderInSupabase(order, buyer.id, userId, lineItems, shippingCost, lineItemFulfillmentStatus);
+                    const researcher = itemsMap[lineItems[0].legacyItemId]?.researcher || ""
+                    
+                    await updateOrderInSupabase(order, buyer.id, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher);
                 } catch (error) {
                     console.log("itemsMap",itemsMap)
                     console.log("order.orderId,",order.orderId)
