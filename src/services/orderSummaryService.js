@@ -1,15 +1,18 @@
 const supabase = require('../supabaseClient');
 
+const DOLLAR_TO_YEN_RATE = 150; // ドル円レートを150円に設定
+
 // 利益額と利益率を計算する関数を追加
 function calculateProfitAndMargin(order) {
-  const totalCost = order.line_items.reduce((sum, item) => sum + item.cost_price, 0) + order.shipping_cost;
-  const profit = order.earnings - totalCost;
-  const profitMargin = (profit / order.earnings) * 100;
+  const totalCostYen = order.line_items.reduce((sum, item) => sum + parseFloat(item.cost_price) || 0, 0) + parseFloat(order.shipping_cost) || 0;
+  const earningsAfterPLFeeYen = (order.earnings_after_pl_fee * 0.98) * DOLLAR_TO_YEN_RATE; // 手数料を引いて円に換算
+  const profit = earningsAfterPLFeeYen - totalCostYen;
+  const profitMargin = (profit / earningsAfterPLFeeYen) * 100; // 利益率を計算
   return { profit, profitMargin };
 }
 
 exports.fetchOrdersWithFilters = async (filters) => {
-  const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, page = 1, limit = 10 } = filters;
+  const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, page = 1, limit = 20 } = filters;
 
   const offset = (page - 1) * limit;
 
@@ -23,12 +26,15 @@ exports.fetchOrdersWithFilters = async (filters) => {
           earnings,
           earnings_after_pl_fee,
           shipping_cost,
+          subtotal,
           status,
           buyer_country_code,
           researcher,
-          line_items
+          line_items,
+          ebay_user_id
       `)
       .eq('user_id', user_id)
+      .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
       .gte('order_date', start_date)
       .lte('order_date', end_date)
       .range(offset, offset + limit - 1); // ページネーションの範囲を設定
@@ -54,6 +60,7 @@ exports.fetchOrdersWithFilters = async (filters) => {
       .from('orders')
       .select('id', { count: 'exact' })
       .eq('user_id', user_id)
+      .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
       .gte('order_date', start_date)
       .lte('order_date', end_date);
 
@@ -80,8 +87,9 @@ exports.fetchOrderSummary = async (filters) => {
 
   let query = supabase
     .from('orders')
-    .select('earnings_after_pl_fee, researcher')
+    .select('earnings_after_pl_fee, subtotal, shipping_cost, line_items, researcher, line_items')
     .eq('user_id', user_id) // 必須フィルタとしてuser_idを追加
+    .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
     .gte('order_date', start_date)
     .lte('order_date', end_date);
 
@@ -95,7 +103,13 @@ exports.fetchOrderSummary = async (filters) => {
   if (error) throw error;
 
   const totalSales = data.reduce((sum, order) => sum + order.earnings_after_pl_fee, 0);
+  const totalProfit = data.reduce((sum, order) => {
+    const { profit } = calculateProfitAndMargin(order);
+    return sum + profit;
+  }, 0);
+  const totalSubtotal = data.reduce((sum, order) => sum + order.subtotal, 0);
   const totalOrders = data.length;
+  const profitMargin = (totalProfit / (totalSales * 0.98 * DOLLAR_TO_YEN_RATE)) * 100;
 
   const researcherIncentives = data.reduce((acc, order) => {
     const { researcher, earnings_after_pl_fee } = order;
@@ -109,6 +123,9 @@ exports.fetchOrderSummary = async (filters) => {
   return {
     total_sales: totalSales,
     total_orders: totalOrders,
+    total_profit: totalProfit,
+    profit_margin: profitMargin,
+    total_subtotal: totalSubtotal,
     researcher_incentives: researcherIncentives,
   };
 };
