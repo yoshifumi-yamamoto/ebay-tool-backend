@@ -17,7 +17,8 @@ const inventoryRoutes = require('./routes/inventoryRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 const octoparseRoutes = require('./routes/octoparseRoutes');
 const scheduleRoutes = require('./routes/scheduleRoutes');
-const itemRoutes = require('./routes/itemRoutes'); // 新しいルートの追加
+const itemRoutes = require('./routes/itemRoutes'); 
+const orderSummaryRoutes = require('./routes/orderSummaryRoutes');// 新しいルートの追加
 
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
@@ -61,7 +62,8 @@ app.use('/api/inventory', inventoryRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/octoparse', octoparseRoutes); 
 app.use('/api/schedule', scheduleRoutes);
-app.use('/api/items', itemRoutes); // 新しいルートの追加
+app.use('/api/items', itemRoutes); 
+app.use('/api/order-summary', orderSummaryRoutes); // 新しいルートの追加
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {
