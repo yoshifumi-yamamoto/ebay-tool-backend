@@ -2,12 +2,13 @@ const supabase = require('../supabaseClient');
 const { Parser } = require('json2csv');
 
 exports.fetchListingsSummary = async (filters) => {
-  const { start_date, end_date } = filters;
+  const { start_date, end_date, user_id } = filters;
 
   // itemsテーブルからデータを取得
   let itemsQuery = supabase
     .from('items')
-    .select('exhibit_date, research_date, researcher, exhibitor')
+    .select('exhibit_date, research_date, researcher, exhibitor, ebay_user_id')
+    .eq('user_id', user_id)
     .or(`exhibit_date.gte.${start_date},exhibit_date.lte.${end_date}`)
     .or(`research_date.gte.${start_date},research_date.lte.${end_date}`);
 
@@ -32,7 +33,7 @@ exports.fetchListingsSummary = async (filters) => {
 
   // 出品件数とリサーチ件数を集計
   const listingsSummary = itemsData.reduce((acc, item) => {
-    const { researcher, exhibitor, exhibit_date, research_date } = item;
+    const { researcher, exhibitor, exhibit_date, research_date, ebay_user_id } = item;
 
     if (exhibit_date && exhibit_date >= start_date && exhibit_date <= end_date) {
       if (!acc[exhibitor]) acc[exhibitor] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
@@ -56,12 +57,31 @@ exports.fetchListingsSummary = async (filters) => {
     listingsSummary[researcher].salesCount++;
   });
 
-  return { listingsSummary };
+  // 全アカウントの合計出品数を集計
+  const totalExhibitCount = itemsData.reduce((acc, item) => {
+    const { exhibit_date } = item;
+    if (exhibit_date && exhibit_date >= start_date && exhibit_date <= end_date) {
+      acc++;
+    }
+    return acc;
+  }, 0);
+
+  // 各アカウントの出品数を集計
+  const accountSummary = itemsData.reduce((acc, item) => {
+    const { exhibit_date, ebay_user_id } = item;
+    if (exhibit_date && exhibit_date >= start_date && exhibit_date <= end_date) {
+      if (!acc[ebay_user_id]) acc[ebay_user_id] = 0;
+      acc[ebay_user_id]++;
+    }
+    return acc;
+  }, {});
+
+  return { listingsSummary, totalExhibitCount, accountSummary };
 };
 
 // CSVダウンロード機能
 exports.downloadListingsSummaryCSV = async (filters) => {
-  const { listingsSummary } = await this.fetchListingsSummary(filters);
+  const { listingsSummary, totalExhibitCount, accountSummary } = await this.fetchListingsSummary(filters);
 
   // データの整形
   const csvData = Object.keys(listingsSummary).map(researcher => ({
@@ -71,11 +91,20 @@ exports.downloadListingsSummaryCSV = async (filters) => {
     salesCount: listingsSummary[researcher].salesCount || 0
   }));
 
+  csvData.push({
+    researcher: 'Total',
+    exhibitCount: totalExhibitCount,
+    researchCount: '',
+    salesCount: '',
+    accountSummary: JSON.stringify(accountSummary)
+  });
+
   const csvFields = [
     { label: 'Researcher', value: 'researcher' },
     { label: 'Exhibit Count', value: 'exhibitCount' },
     { label: 'Research Count', value: 'researchCount' },
-    { label: 'Sales Count', value: 'salesCount' }
+    { label: 'Sales Count', value: 'salesCount' },
+    { label: 'Account Summary', value: 'accountSummary' }
   ];
 
   const csvParser = new Parser({ fields: csvFields });

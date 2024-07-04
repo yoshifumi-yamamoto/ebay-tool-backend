@@ -1,10 +1,10 @@
 const { fetchListingsSummary, downloadListingsSummaryCSV } = require('../services/listingsSummaryService');
 
 exports.getListingsSummary = async (req, res) => {
-  const { start_date, end_date } = req.query;
+  const { start_date, end_date, user_id } = req.query;
 
   try {
-    const summary = await fetchListingsSummary({ start_date, end_date });
+    const summary = await fetchListingsSummary({ start_date, end_date, user_id });
     res.status(200).json(summary);
   } catch (error) {
     console.error('Error fetching listing summary:', error.message);
@@ -13,10 +13,10 @@ exports.getListingsSummary = async (req, res) => {
 };
 
 exports.downloadListingsSummaryCSV = async (req, res) => {
-  const { start_date, end_date } = req.query;
+  const { start_date, end_date, user_id } = req.query;
 
   try {
-    const csv = await downloadListingsSummaryCSV({ start_date, end_date });
+    const csv = await downloadListingsSummaryCSV({ start_date, end_date, user_id });
     res.header('Content-Type', 'text/csv');
     res.attachment(`listings_summary_${start_date}_to_${end_date}.csv`);
     res.send(csv);
