@@ -1,10 +1,10 @@
 const { fetchOrdersWithFilters, fetchOrderSummary } = require('../services/orderSummaryService');
 
 exports.getOrders = async (req, res) => {
-  const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, page, limit } = req.query;
+  const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, researcher, page, limit } = req.query;
 
   try {
-      const { orders, totalOrders } = await fetchOrdersWithFilters({ start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, page, limit });
+      const { orders, totalOrders } = await fetchOrdersWithFilters({ start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, researcher, page, limit });
       res.status(200).json({ orders, totalOrders });
   } catch (error) {
       console.error('Error fetching orders:', error.message);
