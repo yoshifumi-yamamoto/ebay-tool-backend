@@ -8,7 +8,7 @@ function calculateProfitAndMargin(order) {
   const earningsAfterPLFeeYen = (order.earnings_after_pl_fee * 0.98) * DOLLAR_TO_YEN_RATE; // 手数料を引いて円に換算
   const profit = earningsAfterPLFeeYen - totalCostYen;
   const profitMargin = (profit / earningsAfterPLFeeYen) * 100; // 利益率を計算
-  const researcherIncentive = profit > 0 ? profit * 0.1 : 0; // 利益が正の場合のみインセンティブを計算
+  const researcherIncentive = Math.max(profit * 0.1, 0); // 仮のインセンティブ率 10%
   return { profit, profitMargin, researcherIncentive };
 }
 
@@ -38,6 +38,7 @@ exports.fetchOrdersWithFilters = async (filters) => {
       .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
       .gte('order_date', start_date)
       .lte('order_date', end_date)
+      .order('order_date', { ascending: true }) // order_dateで昇順に並び替え
       .range(offset, offset + limit - 1); // ページネーションの範囲を設定
 
   if (ebay_user_id) query = query.eq('ebay_user_id', ebay_user_id);
@@ -88,7 +89,7 @@ exports.fetchOrderSummary = async (filters) => {
 
   let query = supabase
     .from('orders')
-    .select('earnings_after_pl_fee, subtotal, shipping_cost, line_items, researcher')
+    .select('earnings_after_pl_fee, subtotal, shipping_cost, line_items, researcher, line_items')
     .eq('user_id', user_id) // 必須フィルタとしてuser_idを追加
     .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
     .gte('order_date', start_date)
@@ -113,10 +114,12 @@ exports.fetchOrderSummary = async (filters) => {
   const profitMargin = (totalProfit / (totalSales * 0.98 * DOLLAR_TO_YEN_RATE)) * 100;
 
   const researcherIncentives = data.reduce((acc, order) => {
-    const { researcher, profit } = calculateProfitAndMargin(order);
+    const { researcher, earnings_after_pl_fee } = order;
     if (researcher) {
+      const { profit } = calculateProfitAndMargin(order);
+      const incentive = profit * 0.1; // 仮のインセンティブ率 10%
       if (!acc[researcher]) acc[researcher] = 0;
-      acc[researcher] += profit > 0 ? profit * 0.1 : 0; // 利益が正の場合のみインセンティブを計算
+      acc[researcher] += Math.max(incentive, 0); // インセンティブがマイナスの場合は0を返す
     }
     return acc;
   }, {});
