@@ -1,22 +1,6 @@
 const { readFromSheet, saveItems } = require('../services/sheetsService');
 const supabase = require('../supabaseClient');
-const { parse, format, isValid } = require('date-fns'); 
-
-// 日付フォーマットをチェックし、適切な形式に変換する関数
-function parseDate(dateString) {
-    if (!dateString || dateString.trim() === '') return null; // 空文字列の場合はnullを返す
-    try {
-        const parsedDate = parse(dateString, 'MM/dd', new Date());
-        if (isValid(parsedDate)) {
-            return format(parsedDate, 'yyyy-MM-dd'); // ISO 8601形式で返す
-        }
-        console.error('Invalid date format:', dateString);
-        return null;
-    } catch (error) {
-        console.error('Error parsing date:', error);
-        return null;
-    }
-}
+const { parse, format, isValid } = require('date-fns');
 
 // ユーザーIDに基づいてスプレッドシートのデータをSupabaseに同期する関数
 async function syncSheetToSupabase(req, res) {
@@ -52,6 +36,7 @@ async function syncSheetToSupabase(req, res) {
 
             // データ行を読み取る
             const rows = await readFromSheet(spreadsheet_id, `A3:V`);
+
             // 空行をフィルタリング
             const itemsFromSheet = rows
                 .filter(row => row && row.length >= requiredHeaders.length && row[headerMap['eBay URL']]) // 空行や不完全な行、eBay URLが空白の行を除外
@@ -63,8 +48,8 @@ async function syncSheetToSupabase(req, res) {
                     const shipping_cost = row[headerMap['目安送料']] || '';
                     const researcher = row[headerMap['リサーチ担当']] || '';
                     const exhibitor = row[headerMap['出品担当']] || '';
-                    const exhibit_date = parseDate(row[headerMap['出品作業日']]);
-                    const research_date = parseDate(row[headerMap['リサーチ作業日']]);
+                    const exhibit_date = row[headerMap['出品作業日']];
+                    const research_date = row[headerMap['リサーチ作業日']];
                     const formattedShippingPrice = parseInt(shipping_cost.replace(/[^0-9]/g, '')) || 0; // ¥や,を除去
                     const formattedCostPrice = parseInt(cost_price.replace(/[^0-9]/g, '')) || 0; // ¥や,を除去
                     const ebay_item_id_match = ebay_url.match(/\/(\d+)(?:[\/?]|$)/);
