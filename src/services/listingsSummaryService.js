@@ -91,24 +91,29 @@ exports.downloadListingsSummaryCSV = async (filters) => {
     salesCount: listingsSummary[researcher].salesCount || 0
   }));
 
+  const accountSummaryRows = Object.entries(accountSummary).map(([account, count]) => ({
+    researcher: account,
+    exhibitCount: count,
+    researchCount: '',
+    salesCount: '',
+  }));
+
   csvData.push({
     researcher: 'Total',
     exhibitCount: totalExhibitCount,
     researchCount: '',
     salesCount: '',
-    accountSummary: JSON.stringify(accountSummary)
   });
 
   const csvFields = [
     { label: 'Researcher', value: 'researcher' },
     { label: 'Exhibit Count', value: 'exhibitCount' },
     { label: 'Research Count', value: 'researchCount' },
-    { label: 'Sales Count', value: 'salesCount' },
-    { label: 'Account Summary', value: 'accountSummary' }
+    { label: 'Sales Count', value: 'salesCount' }
   ];
 
   const csvParser = new Parser({ fields: csvFields });
-  const csv = csvParser.parse(csvData);
+  const csv = csvParser.parse([...csvData, ...accountSummaryRows]);
 
   return csv;
 };
