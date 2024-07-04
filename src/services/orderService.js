@@ -108,7 +108,8 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         ebay_user_id: order.sellerId,
         line_items: lineItems.map((item, index) => ({
             ...item,
-            cost_price: existingData ? existingData.line_items[index]?.cost_price : item.cost_price // 更新しない
+            cost_price: existingData ? existingData.line_items[index]?.cost_price : item.cost_price, // 更新しない
+            researcher: existingData ? existingData.researcher : researcher
         })),
         ship_to: order.fulfillmentStartInstructions[0].shippingStep.shipTo,
         shipping_deadline: order.lineItems[0].lineItemFulfillmentInstructions.shipByDate,

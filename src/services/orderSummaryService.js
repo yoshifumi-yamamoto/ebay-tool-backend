@@ -1,3 +1,4 @@
+const { Parser } = require('json2csv');
 const supabase = require('../supabaseClient');
 
 const DOLLAR_TO_YEN_RATE = 150; // ドル円レートを150円に設定
@@ -12,7 +13,7 @@ function calculateProfitAndMargin(order) {
   return { profit, profitMargin, researcherIncentive };
 }
 
-exports.fetchOrdersWithFilters = async (filters) => {
+exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
   const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, researcher, page = 1, limit = 20 } = filters;
 
   const offset = (page - 1) * limit;
@@ -38,13 +39,13 @@ exports.fetchOrdersWithFilters = async (filters) => {
       .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
       .gte('order_date', start_date)
       .lte('order_date', end_date)
-      .order('order_date', { ascending: true }) // order_dateで昇順に並び替え
-      .range(offset, offset + limit - 1); // ページネーションの範囲を設定
+      .order('order_date', { ascending: true }); // order_dateで昇順に並び替え
 
   if (ebay_user_id) query = query.eq('ebay_user_id', ebay_user_id);
   if (status) query = query.eq('status', status);
   if (buyer_country_code) query = query.eq('buyer_country_code', buyer_country_code);
   if (researcher) query = query.eq('researcher', researcher);
+  if (!isCSVDownload) query = query.range(offset, offset + limit - 1); // 通常のデータ取得時のみページングを適用
 
   const { data, error } = await query;
 
@@ -81,7 +82,6 @@ exports.fetchOrdersWithFilters = async (filters) => {
 
   return { orders: ordersWithProfit, totalOrders: count };
 };
-
 
 exports.fetchOrderSummary = async (filters) => {
   const { user_id, start_date, end_date, ebay_user_id, status, buyer_country_code, researcher } = filters;
@@ -135,4 +135,79 @@ exports.fetchOrderSummary = async (filters) => {
     total_subtotal: totalSubtotal,
     researcher_incentives: researcherIncentives,
   };
+};
+
+// csvダウンロード機能
+exports.downloadOrderSummaryCSV = async (filters) => {
+  const allOrdersFilters = { ...filters, page: undefined, limit: undefined };
+  const ordersData = await this.fetchOrdersWithFilters(allOrdersFilters, true);
+  const summaryData = await this.fetchOrderSummary(filters);
+
+  // summaryDataをフォーマット
+  const summaryRows = [
+    { label: 'Total Sales', value: summaryData.total_sales },
+    { label: 'Total Orders', value: summaryData.total_orders },
+    { label: 'Total Profit', value: summaryData.total_profit },
+    { label: 'Profit Margin', value: summaryData.profit_margin },
+    { label: 'Total Subtotal', value: summaryData.total_subtotal },
+    ...Object.entries(summaryData.researcher_incentives).map(([researcher, incentive]) => ({
+      label: `Incentive for ${researcher}`, value: incentive
+    }))
+  ];
+
+  // expandedOrdersを作成
+  const expandedOrders = ordersData.orders.flatMap(order => {
+    let lastResearcher = null;
+    return order.line_items.map((item, index) => {
+      const isDifferentResearcher = item.researcher !== lastResearcher;
+      lastResearcher = item.researcher;
+      return {
+        order_no: order.order_no,
+        order_date: order.order_date,
+        item: item.title,
+        quantity: item.quantity,
+        price: index === 0 ? order.earnings : '',
+        net_total: index === 0 ? order.earnings_after_pl_fee : '',
+        cost_price: item.cost_price,
+        shipping_cost: index === 0 ? order.shipping_cost : '',
+        status: index === 0 ? order.status : '',
+        buyer_country_code: index === 0 ? order.buyer_country_code : '',
+        researcher: item.researcher || order.researcher,
+        researcherIncentive: isDifferentResearcher ? order.researcherIncentive : ''
+      };
+    });
+  });
+
+  // summaryRowsとexpandedOrdersを結合
+  const combinedData = [
+    ...summaryRows.map(row => ({ [row.label]: row.value })),
+    {},
+    ...expandedOrders
+  ];
+
+  // Summary部分を手動でCSV形式に変換
+  const summaryCsv = summaryRows.map(row => `${row.label},${row.value}`).join('\n');
+
+  const csvFields = [
+    { label: 'Order No', value: 'order_no' },
+    { label: 'Date', value: 'order_date' },
+    { label: 'Item', value: 'item' },
+    { label: 'Qty', value: 'quantity' },
+    { label: 'Price', value: 'price' },
+    { label: 'Net Total', value: 'net_total' },
+    { label: 'Cost Price', value: 'cost_price' },
+    { label: 'Shipping Cost', value: 'shipping_cost' },
+    { label: 'Status', value: 'status' },
+    { label: 'Buyer Country', value: 'buyer_country_code' },
+    { label: 'Researcher', value: 'researcher' },
+    { label: 'Incentive', value: 'researcherIncentive' }
+  ];
+
+  const csvParser = new Parser({ fields: csvFields });
+  const csvData = csvParser.parse(expandedOrders);
+
+  // summaryCsvとcsvDataを結合
+  const finalCsvData = `${summaryCsv}\n\n${csvData}`;
+
+  return finalCsvData;
 };
