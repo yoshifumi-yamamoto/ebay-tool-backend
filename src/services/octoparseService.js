@@ -2,56 +2,130 @@ const axios = require('axios');
 const supabase = require('../supabaseClient');
 const octoparseTaskModel = require('../models/octoparseTaskModel');
 
-const getOctoparseToken = async (userId) => {
-  const { data, error } = await supabase
-    .from('octoparse_accounts')
-    .select('access_token, refresh_token, access_token_updated_at, refresh_token_updated_at')
-    .eq('user_id', userId)
-    .single();
+// 特定のユーザーIDに基づいてユーザー名とパスワードを取得
+const getCredentialsFromSupabase = async (userId) => {
 
-  if (error) throw error;
-  return data;
+  try {
+    const { data, error } = await supabase
+      .from('octoparse_accounts')
+      .select('username, password, refresh_token, access_token')
+      .eq('user_id', userId)
+      .single();
+
+    if (error) {
+      console.error('Error fetching credentials from Supabase:', error);
+      throw error;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Error fetching credentials:', error);
+    throw error;
+  }
 };
 
-const refreshOctoparseToken = async (refreshToken) => {
-  console.log("refreshOctoparseToken");
-  const response = await axios.post('https://openapi.octoparse.com/token', {
-    refresh_token: refreshToken,
-    grant_type: 'refresh_token'
-  }, {
-    headers: { 'Content-Type': 'application/json' }
-  });
+// リフレッシュトークンを使ってアクセストークンを取得
+const getAccessTokenWithRefreshToken = async (refreshToken) => {
+  try {
+    const response = await axios.post('https://openapi.octoparse.com/token', {
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token'
+    }, {
+      headers: { 'Content-Type': 'application/json' }
+    });
 
-  const newAccessToken = response.data.data.access_token;
+    return response.data.data.access_token;
+  } catch (error) {
+    if (error.response && error.response.status === 400) {
+      console.error('Refresh token is invalid or expired:', error.response.data);
+    } else {
+      console.error('Error obtaining access token with refresh token:', error.response.data);
+    }
+    throw error;
+  }
+};
+
+// ユーザー名とパスワードを使って新しいリフレッシュトークンとアクセストークンを取得
+const getNewTokensWithCredentials = async (username, password) => {
+  try {
+    const response = await axios.post('https://openapi.octoparse.com/token', {
+      username: username,
+      password: password,
+      grant_type: 'password'
+    }, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    return {
+      accessToken: response.data.data.access_token,
+      refreshToken: response.data.data.refresh_token
+    };
+  } catch (error) {
+    console.error('Error obtaining new tokens with credentials:', error.response.data);
+    throw error;
+  }
+};
+
+// 新しいトークンをSupabaseに保存
+const saveNewTokensToSupabase = async (userId, newAccessToken, newRefreshToken) => {
   const currentTime = new Date().toISOString();
 
-  await supabase
-    .from('octoparse_accounts')
-    .update({
-      access_token: newAccessToken,
-      access_token_updated_at: currentTime
-    })
-    .eq('refresh_token', refreshToken);
+  try {
+    const { data, error } = await supabase
+      .from('octoparse_accounts')
+      .update({
+        access_token: newAccessToken,
+        refresh_token: newRefreshToken,
+        access_token_updated_at: currentTime
+      })
+      .eq('user_id', userId);
 
-  console.log(`New Access Token: ${newAccessToken}`);  // アクセストークンをログに出力（セキュリティ上、本番環境では注意が必要）
+    if (error) {
+      console.error('Error updating tokens in Supabase:', error);
+      throw error;
+    }
 
-  return newAccessToken;
+  } catch (error) {
+    console.error('Error updating tokens in Supabase:', error);
+    throw error;
+  }
 };
 
+// トークンをリフレッシュする関数
+const refreshOctoparseToken = async (userId, refreshToken) => {
 
+  try {
+    // まず、リフレッシュトークンからアクセストークンを取得
+    const newAccessToken = await getAccessTokenWithRefreshToken(refreshToken);
+    return newAccessToken;
+  } catch (error) {
+    if (error.response && error.response.status === 400) {
+      // リフレッシュトークンが無効または期限切れの場合、新しいトークンを取得
+      const { username, password } = await getCredentialsFromSupabase(userId);
+      const { accessToken, refreshToken: newRefreshToken } = await getNewTokensWithCredentials(username, password);
+
+      // 新しいトークンをSupabaseに保存
+      await saveNewTokensToSupabase(userId, accessToken, newRefreshToken);
+
+      return accessToken;
+    } else {
+      throw error;
+    }
+  }
+};
+
+// Octoparseのデータを取得する関数
 const fetchAllOctoparseData = async (userId, taskId) => {
-  let { access_token, refresh_token, access_token_updated_at, refresh_token_updated_at } = await getOctoparseToken(userId);
+  let { access_token, refresh_token } = await getCredentialsFromSupabase(userId);
   const baseUrl = `https://openapi.octoparse.com/data/all`;
   let allData = [];
   let offset = 0;
   const size = 1000;
-  const maxRetries = 1; // トークンリフレッシュの最大試行回数
+  const maxRetries = 3; // トークンリフレッシュの最大試行回数
   let retryCount = 0;
 
   while (true) {
     try {
-      console.log(`Using Access Token: ${access_token}`);  // 現在のアクセストークンをログに出力
-
       const response = await axios.get(baseUrl, {
         headers: {
           'Content-Type': 'application/json',
@@ -74,16 +148,23 @@ const fetchAllOctoparseData = async (userId, taskId) => {
       }
 
     } catch (error) {
-      console.log("fetchAllOctoparseData error");
-      if (error.response && error.response.status === 401 && retryCount < maxRetries) {
-        retryCount++;
-        access_token = await refreshOctoparseToken(refresh_token);
-        console.log(`Refreshed Access Token: ${access_token}`);  // リフレッシュされたアクセストークンをログに出力
 
-        await supabase
-          .from('octoparse_accounts')
-          .update({ access_token })
-          .eq('user_id', userId);
+      if ((error.response && (error.response.status === 401 || error.response.status === 403)) && retryCount < maxRetries) {
+        console.log(`Attempting to refresh token... Retry count: ${retryCount}`);
+        retryCount++;
+        try {
+          const newAccessToken = await refreshOctoparseToken(userId, refresh_token);  // userIdとrefresh_tokenを渡す
+
+          await supabase
+            .from('octoparse_accounts')
+            .update({ access_token: newAccessToken })
+            .eq('user_id', userId);
+
+          access_token = newAccessToken;
+        } catch (refreshError) {
+          console.error('Failed to refresh token:', refreshError.message);
+          throw new Error(`Failed to refresh token: ${refreshError.message}`);
+        }
       } else {
         throw new Error(`Error fetching data from Octoparse: ${error.message}`);
       }
@@ -93,11 +174,10 @@ const fetchAllOctoparseData = async (userId, taskId) => {
   return allData;
 };
 
-
 // Octoparseのデータを削除する関数
 const deleteOctoparseData = async (userId, taskId) => {
-  let { access_token, refresh_token } = await getOctoparseToken(userId);
-  const maxRetries = 1; // トークンリフレッシュの最大試行回数
+  let { access_token, refresh_token } = await getCredentialsFromSupabase(userId);
+  const maxRetries = 3; // トークンリフレッシュの最大試行回数
   let retryCount = 0;
 
   try {
@@ -116,10 +196,25 @@ const deleteOctoparseData = async (userId, taskId) => {
       console.error('Failed to delete data from Octoparse:', response.data);
     }
   } catch (error) {
-    if (error.response && error.response.status === 401 && retryCount < maxRetries) {
+    console.log("deleteOctoparseData error");
+    console.log("Error details:", error.response ? error.response.data : error.message);
+
+    if ((error.response && (error.response.status === 401 || error.response.status === 403)) && retryCount < maxRetries) {
+      console.log(`Attempting to refresh token... Retry count: ${retryCount}`);
       retryCount++;
-      access_token = await refreshOctoparseToken(refresh_token);
-      await deleteOctoparseData(userId, taskId);  // トークン更新後に再試行
+      try {
+        const newAccessToken = await refreshOctoparseToken(userId, refresh_token);  // userIdとrefresh_tokenを渡す
+        await supabase
+          .from('octoparse_accounts')
+          .update({ access_token: newAccessToken })
+          .eq('user_id', userId);
+
+        access_token = newAccessToken;
+        await deleteOctoparseData(userId, taskId);  // トークン更新後に再試行
+      } catch (refreshError) {
+        console.error('Failed to refresh token:', refreshError.message);
+        throw new Error(`Failed to refresh token: ${refreshError.message}`);
+      }
     } else {
       throw new Error(`Error deleting data from Octoparse: ${error.message}`);
     }
