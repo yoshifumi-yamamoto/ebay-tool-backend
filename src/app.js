@@ -91,40 +91,40 @@ app.use('/api/categories', categoryRoutes);
 if (process.env.ENABLE_SCHEDULER === 'true') {
   scheduleInventoryUpdates();
 
-  // 深夜1時にsync APIを実行するCronJob
-  const runSyncApiJob = new CronJob('0 1 * * *', () => {
-      exec('curl -X GET "http://localhost:3000/api/listings/sync?userId=2"', (error, stdout, stderr) => {
-          if (error) {
-              console.error(`Error executing sync API: ${error}`);
-              return;
-          }
-          if (stderr) {
-              console.error(`Error output: ${stderr}`);
-              return;
-          }
-          console.log(`Sync API response: ${stdout}`);
-      });
-  }, null, true, 'Asia/Tokyo');
+  // // 深夜1時にsync APIを実行するCronJob
+  // const runSyncApiJob = new CronJob('0 1 * * *', () => {
+  //     exec('curl -X GET "http://localhost:3000/api/listings/sync?userId=2"', (error, stdout, stderr) => {
+  //         if (error) {
+  //             console.error(`Error executing sync API: ${error}`);
+  //             return;
+  //         }
+  //         if (stderr) {
+  //             console.error(`Error output: ${stderr}`);
+  //             return;
+  //         }
+  //         console.log(`Sync API response: ${stdout}`);
+  //     });
+  // }, null, true, 'Asia/Tokyo');
 
-  // CronJobの開始
-  runSyncApiJob.start();
+  // // CronJobの開始
+  // runSyncApiJob.start();
 
-  // 毎週月曜日の7時にChatworkのAPIを実行するCronJob
-  const runChatworkApiJob = new CronJob('0 7 * * 1', () => {
-    exec('curl -X GET "http://localhost:3000/api/chatwork/last-week-orders/2"', (error, stdout, stderr) => {
-        if (error) {
-            console.error(`Error executing Chatwork API: ${error}`);
-            return;
-        }
-        if (stderr) {
-            console.error(`Error output: ${stderr}`);
-            return;
-        }
-        console.log(`Chatwork API response: ${stdout}`);
-    });
-  }, null, true, 'Asia/Tokyo');
+  // // 毎週月曜日の7時にChatworkのAPIを実行するCronJob
+  // const runChatworkApiJob = new CronJob('0 7 * * 1', () => {
+  //   exec('curl -X GET "http://localhost:3000/api/chatwork/last-week-orders/2"', (error, stdout, stderr) => {
+  //       if (error) {
+  //           console.error(`Error executing Chatwork API: ${error}`);
+  //           return;
+  //       }
+  //       if (stderr) {
+  //           console.error(`Error output: ${stderr}`);
+  //           return;
+  //       }
+  //       console.log(`Chatwork API response: ${stdout}`);
+  //   });
+  // }, null, true, 'Asia/Tokyo');
 
-  runChatworkApiJob.start();
+  // runChatworkApiJob.start();
 }
 
 module.exports = app;
