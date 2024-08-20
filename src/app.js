@@ -22,9 +22,13 @@ const orderSummaryRoutes = require('./routes/orderSummaryRoutes');
 const listingsSummaryRoutes = require('./routes/listingsSummaryRoutes');
 const messageTemplatesRoutes = require('./routes/messageTemplatesRoutes'); 
 const listingRoutes = require('./routes/listingRoutes');
+const csvRoutes = require('./routes/csvRoutes');
+const categoryRoutes = require('./routes/categoryRoutes');
 
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
+const { CronJob } = require('cron');
+const { exec } = require('child_process');
 
 // 許可するオリジンのリスト
 const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.vercel.app'];
@@ -70,10 +74,47 @@ app.use('/api/order-summary', orderSummaryRoutes);
 app.use('/api/listings-summary', listingsSummaryRoutes);
 app.use('/api/message-templates', messageTemplatesRoutes); 
 app.use('/api/listings', listingRoutes);
+app.use('/api/csv', csvRoutes);
+app.use('/api/categories', categoryRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {
   scheduleInventoryUpdates();
+
+  // 深夜1時にsync APIを実行するCronJob
+  const runSyncApiJob = new CronJob('0 1 * * *', () => {
+      exec('curl -X GET "http://localhost:3000/api/listings/sync?userId=2"', (error, stdout, stderr) => {
+          if (error) {
+              console.error(`Error executing sync API: ${error}`);
+              return;
+          }
+          if (stderr) {
+              console.error(`Error output: ${stderr}`);
+              return;
+          }
+          console.log(`Sync API response: ${stdout}`);
+      });
+  }, null, true, 'Asia/Tokyo');
+
+  // CronJobの開始
+  runSyncApiJob.start();
+
+  // 毎週月曜日の7時にChatworkのAPIを実行するCronJob
+  const runChatworkApiJob = new CronJob('0 7 * * 1', () => {
+    exec('curl -X GET "http://localhost:3000/api/chatwork/last-week-orders/2"', (error, stdout, stderr) => {
+        if (error) {
+            console.error(`Error executing Chatwork API: ${error}`);
+            return;
+        }
+        if (stderr) {
+            console.error(`Error output: ${stderr}`);
+            return;
+        }
+        console.log(`Chatwork API response: ${stdout}`);
+    });
+  }, null, true, 'Asia/Tokyo');
+
+  runChatworkApiJob.start();
 }
 
 module.exports = app;
