@@ -1,10 +1,14 @@
 const express = require('express');
 const multer = require('multer');
-const { processCSVUpload } = require('../controllers/csvController');
+const csvController = require('../controllers/csvController');
 
 const router = express.Router();
-const upload = multer({ dest: 'uploads/' });
 
-router.post('/upload', upload.single('file'), processCSVUpload);
+// メモリストレージを使用するための設定
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
+// ファイルアップロードのルート
+router.post('/upload', upload.single('file'), csvController.uploadCSV);
 
 module.exports = router;
