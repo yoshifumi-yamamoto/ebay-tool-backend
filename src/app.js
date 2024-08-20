@@ -33,6 +33,20 @@ const { exec } = require('child_process');
 // 許可するオリジンのリスト
 const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.vercel.app'];
 
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true, // 必要に応じてクレデンシャルを許可
+  optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
+
 // CORS設定
 app.use(cors({
   origin: (origin, callback) => {
