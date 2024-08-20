@@ -127,6 +127,4 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
   runChatworkApiJob.start();
 }
 
-
-
 module.exports = app;
