@@ -37,7 +37,7 @@ const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.ver
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
+      callback(null, origin); // ヘッダーに1つのオリジンのみ設定
     } else {
       callback(new Error('Not allowed by CORS'));
     }
@@ -54,6 +54,16 @@ app.use((req, res, next) => {
     const responseTime = Date.now() - req.requestTime;
     console.log(`${req.method} ${req.originalUrl} took ${responseTime}ms`);
   });
+  next();
+});
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   next();
 });
 
@@ -116,5 +126,7 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
 
   runChatworkApiJob.start();
 }
+
+
 
 module.exports = app;
