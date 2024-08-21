@@ -22,7 +22,7 @@ const orderSummaryRoutes = require('./routes/orderSummaryRoutes');
 const listingsSummaryRoutes = require('./routes/listingsSummaryRoutes');
 const messageTemplatesRoutes = require('./routes/messageTemplatesRoutes'); 
 const listingRoutes = require('./routes/listingRoutes');
-const csvRoutes = require('./routes/csvRoutes');
+// const csvRoutes = require('./routes/csvRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 
 // スケジューラのインポート
@@ -98,7 +98,7 @@ app.use('/api/order-summary', orderSummaryRoutes);
 app.use('/api/listings-summary', listingsSummaryRoutes);
 app.use('/api/message-templates', messageTemplatesRoutes); 
 app.use('/api/listings', listingRoutes);
-app.use('/api/csv', csvRoutes);
+// app.use('/api/csv', csvRoutes);
 app.use('/api/categories', categoryRoutes);
 
 // スケジューラを環境変数に基づいて起動
