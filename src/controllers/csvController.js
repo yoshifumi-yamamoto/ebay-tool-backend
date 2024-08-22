@@ -2,27 +2,30 @@ const { updateCategoriesFromCSV, updateTrafficFromCSV } = require('../services/c
 const { Readable } = require('stream');
 
 const processCSVUpload = async (req, res) => {
-    const { fileType, month } = req.body;
+    const { fileType, month, user_id } = req.body; // user_id を取得
     const file = req.file;
 
     if (!file) {
         return res.status(400).json({ error: 'No file uploaded' });
     }
 
+    if (!user_id) {
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+
     try {
-        // バッファをストリームとして扱う
         const bufferStream = new Readable();
         bufferStream.push(file.buffer);
-        bufferStream.push(null);  // ストリームの終わりを示す
+        bufferStream.push(null); 
 
         if (fileType === 'category') {
-            await updateCategoriesFromCSV(bufferStream);
+            await updateCategoriesFromCSV(bufferStream, user_id); // user_id を渡す
             res.status(200).json({ message: 'Category CSV processed successfully' });
         } else if (fileType === 'traffic') {
             if (!month) {
                 return res.status(400).json({ error: 'Month is required for traffic CSV' });
             }
-            await updateTrafficFromCSV(bufferStream, month);
+            await updateTrafficFromCSV(bufferStream, month, user_id); // user_id を渡す
             res.status(200).json({ message: 'Traffic CSV processed successfully' });
         } else {
             return res.status(400).json({ error: 'Invalid fileType' });
@@ -32,6 +35,7 @@ const processCSVUpload = async (req, res) => {
         res.status(500).json({ error: `Error processing ${fileType} file` });
     }
 };
+
 
 module.exports = {
     processCSVUpload,

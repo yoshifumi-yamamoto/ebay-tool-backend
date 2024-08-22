@@ -24,6 +24,7 @@ const messageTemplatesRoutes = require('./routes/messageTemplatesRoutes');
 const listingRoutes = require('./routes/listingRoutes');
 // const csvRoutes = require('./routes/csvRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
+const itemSearchRoutes = require('./routes/itemSearchRoutes');
 
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
@@ -100,6 +101,7 @@ app.use('/api/message-templates', messageTemplatesRoutes);
 app.use('/api/listings', listingRoutes);
 // app.use('/api/csv', csvRoutes);
 app.use('/api/categories', categoryRoutes);
+app.use('/api/item-search', itemSearchRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {

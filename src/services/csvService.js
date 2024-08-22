@@ -53,7 +53,7 @@ async function migrateToTrafficHistory(updates) {
     await processBatches(updates, 'traffic');
 }
 
-async function updateCategoriesFromCSV(filePath) {
+async function updateCategoriesFromCSV(filePath, userId) {
     const results = [];
 
     fs.createReadStream(filePath)
@@ -70,15 +70,16 @@ async function updateCategoriesFromCSV(filePath) {
             const updates = results.map(row => ({
                 ebay_item_id: row['Item number'],
                 category_id: row['eBay category 1 number'],
-                category_name: row['eBay category 1 name']
-            })).filter(update => update.ebay_item_id); // itemIdがあるもののみを対象
+                category_name: row['eBay category 1 name'],
+                user_id: userId // user_id を付与
+            })).filter(update => update.ebay_item_id);
 
             await upsertItemsTable(updates);
             console.log('CSV processing for categories completed.');
         });
 }
 
-async function updateTrafficFromCSV(filePath, month) {
+async function updateTrafficFromCSV(filePath, month, userId) {
     const results = [];
 
     fs.createReadStream(filePath)
@@ -129,7 +130,8 @@ async function updateTrafficFromCSV(filePath, month) {
                         report_month: month,
                         monthly_impressions: parseInt(row['Total impressions on eBay site'], 10) || 0,
                         monthly_views: parseInt(row['Total page views'], 10) || 0,
-                        monthly_sales_conversion_rate: salesConversionRate
+                        monthly_sales_conversion_rate: salesConversionRate,
+                        user_id: userId // user_id を付与
                     };
 
                     if (!item || item.report_month !== month) {
