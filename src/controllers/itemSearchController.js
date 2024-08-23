@@ -5,6 +5,7 @@ async function getItems(req, res) {
   
     try {
         const queryParams = req.body; // POSTリクエストからボディを取得
+        console.log({queryParams})
 
         if (!queryParams.user_id || !queryParams.report_month) {
             console.log(("getItems if"))
