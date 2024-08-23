@@ -2,32 +2,51 @@ const { updateCategoriesFromCSV, updateTrafficFromCSV } = require('../services/c
 const { Readable } = require('stream');
 
 const processCSVUpload = async (req, res) => {
-    const { fileType, month, user_id } = req.body; // user_id を取得
+    const { fileType, report_month, ebay_user_id, user_id } = req.body;
+    console.log('Inside processCSVUpload');
+    console.log('Request body:', req.body);
+    console.log('Uploaded file:', req.file);
+
     const file = req.file;
 
+    // 追加のデバッグ用ログ
+    console.log('fileType:', fileType);
+    console.log('report_month:', report_month);
+    console.log('ebay_user_id:', ebay_user_id);
+    console.log('user_id:', user_id);
+
     if (!file) {
+        console.error('No file uploaded');
         return res.status(400).json({ error: 'No file uploaded' });
     }
 
     if (!user_id) {
+        console.error('user_id is required');
         return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    if (!ebay_user_id) {
+        console.error('ebay_user_id is required');
+        return res.status(400).json({ error: 'ebay_user_id is required' });
     }
 
     try {
         const bufferStream = new Readable();
         bufferStream.push(file.buffer);
-        bufferStream.push(null); 
+        bufferStream.push(null);
 
         if (fileType === 'category') {
-            await updateCategoriesFromCSV(bufferStream, user_id); // user_id を渡す
+            await updateCategoriesFromCSV(bufferStream, report_month, ebay_user_id, user_id);
             res.status(200).json({ message: 'Category CSV processed successfully' });
         } else if (fileType === 'traffic') {
-            if (!month) {
-                return res.status(400).json({ error: 'Month is required for traffic CSV' });
+            if (!report_month) {
+                console.error('report_month is required');
+                return res.status(400).json({ error: 'report_month is required for traffic CSV' });
             }
-            await updateTrafficFromCSV(bufferStream, month, user_id); // user_id を渡す
+            await updateTrafficFromCSV(bufferStream, report_month, ebay_user_id, user_id);
             res.status(200).json({ message: 'Traffic CSV processed successfully' });
         } else {
+            console.error('Invalid fileType');
             return res.status(400).json({ error: 'Invalid fileType' });
         }
     } catch (error) {
@@ -35,7 +54,6 @@ const processCSVUpload = async (req, res) => {
         res.status(500).json({ error: `Error processing ${fileType} file` });
     }
 };
-
 
 module.exports = {
     processCSVUpload,

@@ -1,5 +1,4 @@
 const csv = require('csv-parser');
-const fs = require('fs');
 const supabase = require('../supabaseClient');
 
 const batchSize = 100; // バッチサイズを設定
@@ -45,7 +44,7 @@ async function processBatches(updates, type) {
     console.log(`Successfully processed ${updates.length} ${type} updates.`);
 }
 
-async function upsertItemsTable(updates) {
+async function updateItemsTable(updates) {
     await processBatches(updates, 'category');
 }
 
@@ -53,10 +52,37 @@ async function migrateToTrafficHistory(updates) {
     await processBatches(updates, 'traffic');
 }
 
-async function updateCategoriesFromCSV(filePath, userId) {
+async function updateTrafficHistory(updates) {
+    // すべての更新を一括で処理するためにバッチ処理
+    const batches = [];
+
+    for (let i = 0; i < updates.length; i += batchSize) {
+        const batch = updates.slice(i, i + batchSize);
+        batches.push(batch);
+    }
+
+    for (const batch of batches) {
+        const { data, error } = await supabase.from('traffic_history').upsert(batch, {
+            onConflict: ['ebay_item_id', 'report_month', 'ebay_user_id'],
+        });
+
+        if (error) {
+            console.error('Error upserting batch for traffic:', error.message);
+        } else {
+            console.log(`Successfully upserted batch with ${batch.length} records.`);
+        }
+    }
+
+    console.log(`Successfully processed ${updates.length} traffic history records.`);
+}
+
+
+
+
+async function updateCategoriesFromCSV(fileBuffer, report_month, ebay_user_id, user_id) {
     const results = [];
 
-    fs.createReadStream(filePath)
+    fileBuffer
         .pipe(csv({
             mapHeaders: ({ header }) => header.trim().replace(/^"|"$/g, '').replace(/^\uFEFF/, '')
         }))
@@ -71,18 +97,25 @@ async function updateCategoriesFromCSV(filePath, userId) {
                 ebay_item_id: row['Item number'],
                 category_id: row['eBay category 1 number'],
                 category_name: row['eBay category 1 name'],
-                user_id: userId // user_id を付与
+                report_month,
+                ebay_user_id,
+                // user_id: userId // user_id を付与
             })).filter(update => update.ebay_item_id);
 
-            await upsertItemsTable(updates);
+            // itemsテーブルにカテゴリ情報をアップサート
+            // await updateItemsTable(updates);
+
+            // traffic_historyテーブルにカテゴリ情報を更新
+            await updateTrafficHistory(updates);
+
             console.log('CSV processing for categories completed.');
         });
 }
 
-async function updateTrafficFromCSV(filePath, month, userId) {
+async function updateTrafficFromCSV(fileBuffer, report_month, ebay_user_id, userId) {
     const results = [];
 
-    fs.createReadStream(filePath)
+    fileBuffer
         .pipe(csv({
             mapHeaders: ({ header }) => header.trim().replace(/^"|"$/g, '').replace(/^\uFEFF/, '')
         }))
@@ -93,63 +126,47 @@ async function updateTrafficFromCSV(filePath, month, userId) {
             results.push(data);
         })
         .on('end', async () => {
-            const itemIds = results.map(row => row['eBay item ID']).filter(Boolean);
-            
-            const chunkSize = 1000; 
-            const itemsToUpdate = [];
-            const itemsToMigrate = [];
-
-            const currentDate = new Date();
-            const currentMonth = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
-
-            for (let i = 0; i < itemIds.length; i += chunkSize) {
-                const chunk = itemIds.slice(i, i + chunkSize);
-                
-                const { data: items, error } = await supabase
-                    .from('items')
-                    .select('ebay_item_id, report_month')
-                    .in('ebay_item_id', chunk);
-
-                if (error) {
-                    console.error('Error fetching items:', error.message);
-                    continue;
+            const updates = results.map(row => {
+                let salesConversionRate = row['Sales conversion rate = Quantity sold/Total page views'];
+                if (salesConversionRate === '-' || !salesConversionRate || salesConversionRate.trim() === '') {
+                    salesConversionRate = null;
+                } else {
+                    salesConversionRate = parseFloat(salesConversionRate.replace('%', '').trim()) / 100.0;
                 }
 
-                results.forEach(row => {
-                    const item = items.find(item => item.ebay_item_id === row['eBay item ID']);
-                    
-                    let salesConversionRate = row['Sales conversion rate = Quantity sold/Total page views'];
-                    if (salesConversionRate === '-' || !salesConversionRate || salesConversionRate.trim() === '') {
-                        salesConversionRate = null;
-                    } else {
-                        salesConversionRate = parseFloat(salesConversionRate.replace('%', '').trim()) / 100.0;
-                    }
+                return {
+                    ebay_item_id: row['eBay item ID'],
+                    report_month,
+                    ebay_user_id, // 引数で受け取ったebay_user_idを使用
+                    user_id: userId, // user_id を付与
+                    listing_title: row['Listing title'],
+                    current_promoted_listings_status: row['Current promoted listings status'],
+                    quantity_available: parseInt(row['Quantity available'], 10) || 0,
+                    total_impressions_on_ebay_site: parseInt(row['Total impressions on eBay site'], 10) || 0,
+                    click_through_rate: parseFloat(row['Click-through rate = Page views from eBay site/Total impressions'].replace('%', '').trim()) / 100.0 || 0,
+                    quantity_sold: parseInt(row['Quantity sold'], 10) || 0,
+                    sales_conversion_rate: salesConversionRate,
+                    top_20_search_spot_impressions_from_promoted_listings: parseInt(row['Top 20 search spot impressions from promoted listings'], 10) || 0,
+                    percent_change_in_top_20_search_spot_impressions_from_promoted_: parseFloat(row['% Change in Top 20 search spot impressions from promoted listings'].replace('%', '').trim()) || 0,
+                    top_20_search_spot_organic_impressions: parseInt(row['Top 20 search spot organic impressions'], 10) || 0,
+                    percent_change_in_top_20_search_spot_organic_impressions: parseFloat(row['% Change in Top 20 search spot impressions'].replace('%', '').trim()) || 0,  // 修正部分
+                    rest_of_search_spot_impressions: parseInt(row['Rest of search spot impressions'], 10) || 0,
+                    non_search_promoted_listings_impressions: parseInt(row['Non-search promoted listings impressions'], 10) || 0,
+                    percent_change_in_non_search_promoted_listings_impressions: parseFloat(row['% Change in non-search promoted listings impressions'].replace('%', '').trim()) || 0,
+                    non_search_organic_impressions: parseInt(row['Non-search organic impressions'], 10) || 0,
+                    percent_change_in_non_search_organic_impressions: parseFloat(row['% Change in non-search organic impressions'].replace('%', '').trim()) || 0,
+                    total_promoted_listings_impressions: parseInt(row['Total promoted listings impressions (applies to eBay site only)'], 10) || 0,
+                    total_organic_impressions_on_ebay_site: parseInt(row['Total organic impressions on eBay site'], 10) || 0,
+                    total_page_views: parseInt(row['Total page views'], 10) || 0,
+                    page_views_via_promoted_listings_impressions_on_ebay_site: parseInt(row['Page views via promoted listings impressions on eBay site'], 10) || 0,
+                    page_views_via_promoted_listings_impressions_from_outside_ebay: parseInt(row['Page views via promoted listings Impressions from outside eBay (search engines, affiliates)'], 10) || 0,
+                    page_views_via_organic_impressions_on_ebay_site: parseInt(row['Page views via organic impressions on eBay site'], 10) || 0,
+                    page_views_from_organic_impressions_outside_ebay: parseInt(row['Page views from organic impressions outside eBay (Includes page views from search engines)'], 10) || 0,
+                };
+            });
 
-                    const updateData = {
-                        ebay_item_id: row['eBay item ID'],
-                        report_month: month,
-                        monthly_impressions: parseInt(row['Total impressions on eBay site'], 10) || 0,
-                        monthly_views: parseInt(row['Total page views'], 10) || 0,
-                        monthly_sales_conversion_rate: salesConversionRate,
-                        user_id: userId // user_id を付与
-                    };
-
-                    if (!item || item.report_month !== month) {
-                        if (month === currentMonth) {
-                            itemsToUpdate.push(updateData);
-                        } else {
-                            itemsToMigrate.push(updateData);
-                        }
-                    }
-                });
-            }
-
-            if (itemsToUpdate.length > 0) {
-                await upsertItemsTable(itemsToUpdate);
-            }
-
-            if (itemsToMigrate.length > 0) {
-                await migrateToTrafficHistory(itemsToMigrate);
+            if (updates.length > 0) {
+                await migrateToTrafficHistory(updates);
             }
 
             console.log('CSV processing for traffic completed.');

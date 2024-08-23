@@ -58,24 +58,34 @@ async function searchItems(queryParams) {
       itemsQuery = itemsQuery.like('title', `%${item_title}%`);
     }
   } else {
-    itemsQuery = supabase
-      .from('traffic_history')
+    let filteredItemsQuery = supabase
+      .from('items')
       .select('ebay_item_id', { count: 'exact' })
       .eq('user_id', user_id)
       .eq('report_month', report_month);
 
     if (ebay_user_id) {
-      itemsQuery = itemsQuery.eq('ebay_user_id', ebay_user_id);
+      filteredItemsQuery = filteredItemsQuery.eq('ebay_user_id', ebay_user_id);
+    }
+    if (category_id) {
+      filteredItemsQuery = filteredItemsQuery.eq('category_id', category_id);
+    }
+    if (item_title) {
+      filteredItemsQuery = filteredItemsQuery.like('title', `%${item_title}%`);
     }
 
-    const { data: itemsData, error: itemsError } = await itemsQuery;
-    if (itemsError) {
-      throw new Error(`Error fetching items: ${itemsError.message}`);
+    const { data: filteredItemsData, error: filteredItemsError } = await filteredItemsQuery;
+    if (filteredItemsError) {
+      throw new Error(`Error fetching filtered items: ${filteredItemsError.message}`);
     }
 
-    const ebayItemIds = itemsData.map(item => item.ebay_item_id);
+    console.log('Filtered Items Data:', filteredItemsData);
 
-    if (ebayItemIds.length > 0) {
+    const ebayItemIds = filteredItemsData.map(item => item.ebay_item_id);
+
+    if (ebayItemIds.length === 0) {
+      console.warn('No matching items found in items table for past month. Proceeding with empty result.');
+    } else {
       const batchSize = 500;
       for (let i = 0; i < ebayItemIds.length; i += batchSize) {
         const batch = ebayItemIds.slice(i, i + batchSize);
@@ -109,10 +119,13 @@ async function searchItems(queryParams) {
             trafficData.map(trafficItem => {
               const matchedItem = additionalItemsData.find(item => item.ebay_item_id === trafficItem.ebay_item_id);
               return {
-                ...trafficItem,
+                ebay_item_id: trafficItem.ebay_item_id,
                 title: matchedItem ? matchedItem.title : null,
                 category_id: matchedItem ? matchedItem.category_id : null,
                 category_name: matchedItem ? matchedItem.category_name : null,
+                monthly_impressions: trafficItem.monthly_impressions,
+                monthly_views: trafficItem.monthly_views,
+                monthly_sales_conversion_rate: trafficItem.monthly_sales_conversion_rate
               };
             })
           );
@@ -120,6 +133,11 @@ async function searchItems(queryParams) {
         trafficData = mergedData;
       }
     }
+  }
+
+  if (!itemsQuery && trafficData.length === 0) {
+    console.error('Items Query is undefined and no traffic data. Skipping further operations.');
+    return { items: [], summary: {} };
   }
 
   const { count: totalItemsCount, error: totalItemsError } = await itemsQuery;

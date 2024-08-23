@@ -9,6 +9,11 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
 // ファイルアップロードのルート
-router.post('/upload', upload.single('file'), csvController.uploadCSV);
+router.post('/upload', upload.single('file'), (req, res, next) => {
+  console.log('Received request body:', req.body);
+  console.log('Received file:', req.file);
+  next(); // 次のミドルウェアへ
+}, csvController.processCSVUpload);
+
 
 module.exports = router;
