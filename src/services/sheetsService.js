@@ -92,6 +92,37 @@ async function saveItems(items, userId) {
                 });
 
             if (error) {
+                // エラー発生時、バッチ内の個々のアイテムで `upsert` を試みる
+                console.log("----------error---------");
+                // console.log(batch);
+                for (const item of batch) {
+                    try {
+                        const { error: itemError } = await supabase
+                            .from('items')
+                            .upsert(item, {
+                                onConflict: ['ebay_item_id', 'user_id'],
+                                updateColumns: [
+                                    'title',
+                                    'stocking_url',
+                                    'cost_price',
+                                    'shipping_cost',
+                                    'researcher',
+                                    'exhibitor',
+                                    'exhibit_date',
+                                    'research_date',
+                                    'ebay_user_id',
+                                    'updated_at'
+                                ]
+                            });
+
+                        if (itemError) {
+                            console.log("Error upserting item:", item);
+                            console.log("Item error:", itemError.message);
+                        }
+                    } catch (innerError) {
+                        console.error("Unexpected error during individual upsert:", innerError.message);
+                    }
+                }
                 throw error;
             }
         }
@@ -101,6 +132,7 @@ async function saveItems(items, userId) {
         throw error;
     }
 }
+
 
 module.exports = {
     readFromSheet,

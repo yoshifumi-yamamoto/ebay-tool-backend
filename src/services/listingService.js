@@ -107,7 +107,9 @@ async function updateItemsTableWithListings(listings, ebayUserId, failedItems) {
           ebay_item_id: listing.itemId,
           ebay_user_id: ebayUserId,
           listing_status: listing.status,
-          status_synced_at: syncedAt
+          status_synced_at: syncedAt, 
+          // userから取得するように要修正！！
+          user_id: 2
       };
   });
 

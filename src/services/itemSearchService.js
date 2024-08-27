@@ -59,6 +59,72 @@ const getChildCategoryIdsRecursively = async (parentCategoryId) => {
   return allChildCategoryIds;
 };
 
+const filterOrdersByCategory = async (orders, category_id) => {
+  const allChildCategoryIds = await getChildCategoryIdsRecursively(category_id);
+  const allCategories = [category_id, ...allChildCategoryIds];
+
+  const filteredOrders = [];
+  let totalEarnings = 0;
+  let totalProfit = 0;
+  let totalSubtotal = 0;
+
+  for (const order of orders) {
+    let orderProfit = 0;
+    let matchFound = false;
+    const matchingLineItems = [];
+
+    for (const item of order.line_items) {
+      const { data: itemData, error } = await supabase
+        .from('items')
+        .select('category_id')
+        .eq('ebay_item_id', item.legacyItemId)
+        .single();
+
+      if (error) {
+        console.error(`Error fetching item with ebay_item_id ${item.legacyItemId}:`, error.message);
+        continue;
+      }
+
+      if (itemData && allCategories.includes(itemData.category_id)) {
+        matchFound = true;
+        matchingLineItems.push(item);
+        
+        // 利益計算
+        const earningsAfterFee = order.earnings_after_pl_fee * 0.98;
+        const profit = earningsAfterFee - (order.shipping_cost || 0) - (itemData.cost_price || 0);
+        orderProfit += profit;
+        totalProfit += profit;
+      }
+    }
+
+    if (matchFound) {
+      filteredOrders.push({
+        ...order,
+        line_items: matchingLineItems
+      });
+
+      totalEarnings += order.earnings_after_pl_fee * 0.98; // 手数料を引いた額を加算
+      totalSubtotal += order.subtotal; // subtotal を合計
+    }
+  }
+
+  const salesQty = filteredOrders.length;
+  const averagePrice = totalSubtotal / salesQty || 0;
+  const averageProfit = totalProfit / salesQty || 0;
+  const averageProfitMargin = (averageProfit / averagePrice) * 100 || 0;
+
+  return {
+    filteredOrders,
+    orderSummary: {
+      salesQty,
+      totalSubtotal,
+      totalProfit,
+      averagePrice,
+      averageProfit,
+      averageProfitMargin,
+    }
+  };
+};
 
 
 async function searchItems(queryParams) {
@@ -88,14 +154,33 @@ async function searchItems(queryParams) {
     trafficQuery = trafficQuery.like('listing_title', `%${listing_title}%`);
   }
 
-  const { data: trafficData, count: totalItemsCount, error: trafficError } = await trafficQuery.range(numericOffset, numericOffset + numericLimit - 1);
+  // 全件の合計を計算するために一度全てのデータを取得
+  const { data: allTrafficData, count: totalItemsCount, error: trafficError } = await trafficQuery;
 
   if (trafficError) {
     throw new Error(`Error fetching traffic data: ${trafficError.message}`);
   }
 
   console.log('Total Items Count:', totalItemsCount);
-  console.log('Fetched Traffic Data:', trafficData.length);
+
+  let totalImpressionsSum = 0;
+  let totalPageViewsSum = 0;
+
+  allTrafficData.forEach((item) => {
+    const totalImpressions = item.total_impressions_on_ebay_site;
+    const totalPageViews = item.total_page_views;
+
+    if (!isNaN(totalImpressions)) {
+      totalImpressionsSum += totalImpressions;
+    }
+
+    if (!isNaN(totalPageViews)) {
+      totalPageViewsSum += totalPageViews;
+    }
+  });
+
+  // 必要なページングされたデータを取得
+  const { data: trafficData } = await trafficQuery.range(numericOffset, numericOffset + numericLimit - 1);
 
   const { data: ordersData, error: ordersError } = await getOrdersForMonth(user_id, report_month);
 
@@ -104,41 +189,33 @@ async function searchItems(queryParams) {
     throw new Error(`Error fetching orders: ${ordersError.message}`);
   }
 
+  const { filteredOrders, orderSummary } = await filterOrdersByCategory(ordersData, category_id);
+
   const summary = {
     totalListings: totalItemsCount,
-    totalSales: 0,
-    totalRevenue: 0,
-    totalProfit: 0,
-    averagePrice: 0,
-    averageProfitMargin: 0,
+    salesQty: orderSummary.salesQty,
+    totalRevenue: orderSummary.totalSubtotal,
+    averageProfitMargin: orderSummary.averageProfit,
+    averagePrice: orderSummary.averagePrice,
+    averageProfit: orderSummary.averageProfit,
+    totalProfit: orderSummary.totalProfit,
+    totalImpressions: totalImpressionsSum,
+    totalPageViews: totalPageViewsSum,
+    averageImpressions: 0,
+    averagePageViews: 0,
+    sellThroughRate: 0,
+    orders: filteredOrders
   };
 
-  const itemSalesData = {};
+  if (summary.salesQty > 0) {
+    summary.averagePrice = summary.totalRevenue / summary.salesQty;
+    summary.averageProfitMargin = (summary.totalProfit / summary.salesQty) * 100;
+    summary.sellThroughRate = (orderSummary.salesQty / summary.totalListings) * 100 || 0;
+  }
 
-  ordersData.forEach((order) => {
-    const itemId = order.ebay_item_id;
-    if (!itemSalesData[itemId]) {
-      itemSalesData[itemId] = {
-        sales: 0,
-        revenue: 0,
-        profit: 0,
-      };
-    }
-
-    itemSalesData[itemId].sales += 1;
-    itemSalesData[itemId].revenue += order.price;
-    itemSalesData[itemId].profit += order.profit;
-  });
-
-  Object.values(itemSalesData).forEach((item) => {
-    summary.totalSales += item.sales;
-    summary.totalRevenue += item.revenue;
-    summary.totalProfit += item.profit;
-  });
-
-  if (summary.totalSales > 0) {
-    summary.averagePrice = summary.totalRevenue / summary.totalSales;
-    summary.averageProfitMargin = (summary.totalProfit / summary.totalRevenue) * 100;
+  if (summary.totalListings > 0) {
+    summary.averageImpressions = summary.totalImpressions / summary.totalListings;
+    summary.averagePageViews = summary.totalPageViews / summary.totalListings;
   }
 
   console.log('Summary calculated:', summary);
