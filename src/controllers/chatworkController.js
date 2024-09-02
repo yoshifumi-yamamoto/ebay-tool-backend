@@ -5,7 +5,7 @@ async function sendWeeklySalesInfo(req, res) {
     // const { token, roomId } = req.body;
     const token = "fe73ec22fd5f0fccee3c07859fa9bcef"
     const roomId = "305985770"
-    // マイチャット
+    // マイチャット(テスト用)
     // const roomId = "217594322"
 
     try {
