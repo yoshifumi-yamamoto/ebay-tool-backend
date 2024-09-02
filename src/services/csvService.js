@@ -8,7 +8,12 @@ async function processBatches(updates, type) {
     const promises = [];
 
     for (let i = 0; i < updates.length; i += batchSize) {
-        const batch = updates.slice(i, i + batchSize);
+        let batch = updates.slice(i, i + batchSize);
+
+        if (type === 'category') {
+            // report_monthフィールドを除外
+            batch = batch.map(({ report_month, ...rest }) => rest);
+        }
 
         let promise;
         if (type === 'category') {
@@ -103,7 +108,7 @@ async function updateCategoriesFromCSV(fileBuffer, report_month, ebay_user_id, u
             })).filter(update => update.ebay_item_id);
 
             // itemsテーブルにカテゴリ情報をアップサート
-            // await updateItemsTable(updates);
+            await updateItemsTable(updates);
 
             // traffic_historyテーブルにカテゴリ情報を更新
             await updateTrafficHistory(updates);

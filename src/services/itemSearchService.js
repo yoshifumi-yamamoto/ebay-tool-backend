@@ -2,6 +2,9 @@ const supabase = require('../supabaseClient');
 const dayjs = require('dayjs');
 require('dotenv').config();
 
+// 仮の為替レート
+const USDJPY = 140
+
 const getNextMonth = (reportMonth) => {
   const [year, month] = reportMonth.split('-').map(Number);
   const nextMonth = month === 12 ? 1 : month + 1;
@@ -9,11 +12,15 @@ const getNextMonth = (reportMonth) => {
   return `${nextYear}-${String(nextMonth).padStart(2, '0')}`;
 };
 
-const getOrdersForMonth = async (userId, reportMonth) => {
-  const { data, error } = await supabase
+const getOrdersForMonth = async (userId, reportMonth, listing_title) => {
+  console.log("reportMonth",`${reportMonth}-01`);
+  console.log("getNextMonth",`${getNextMonth(reportMonth)}-01`);
+
+  let { data, error } = await supabase
     .from('orders')
     .select('*')
     .eq('user_id', userId)
+    .eq('status', "PAID")
     .gte('order_date', `${reportMonth}-01`)
     .lt('order_date', `${getNextMonth(reportMonth)}-01`);
 
@@ -21,6 +28,14 @@ const getOrdersForMonth = async (userId, reportMonth) => {
     console.error('Error fetching orders:', error.message);
     return { data: null, error };
   }
+
+  // 大文字小文字を区別しないように、両方を小文字に変換して比較
+  const normalizedTitle = listing_title.toLowerCase();
+  data = data.filter(order => 
+    order.line_items.some(item => 
+      item.title && item.title.toLowerCase().includes(normalizedTitle)
+    )
+  );
 
   console.log('Orders fetched:', data.length);
   return { data, error: null };
@@ -74,9 +89,9 @@ const filterOrdersByCategory = async (orders, category_id) => {
     const matchingLineItems = [];
 
     for (const item of order.line_items) {
-      const { data: itemData, error } = await supabase
+      let { data: itemData, error } = await supabase
         .from('items')
-        .select('category_id')
+        .select('*')
         .eq('ebay_item_id', item.legacyItemId)
         .single();
 
@@ -91,7 +106,7 @@ const filterOrdersByCategory = async (orders, category_id) => {
         
         // 利益計算
         const earningsAfterFee = order.earnings_after_pl_fee * 0.98;
-        const profit = earningsAfterFee - (order.shipping_cost || 0) - (itemData.cost_price || 0);
+        const profit = earningsAfterFee - ((order.shipping_cost / USDJPY) || 0) - ((itemData.cost_price / USDJPY) || 0);
         orderProfit += profit;
         totalProfit += profit;
       }
@@ -151,8 +166,9 @@ async function searchItems(queryParams) {
   }
 
   if (listing_title) {
-    trafficQuery = trafficQuery.like('listing_title', `%${listing_title}%`);
-  }
+    const normalizedTitle = listing_title.toLowerCase();
+    trafficQuery = trafficQuery.ilike('listing_title', `%${normalizedTitle}%`);
+}
 
   // 全件の合計を計算するために一度全てのデータを取得
   const { data: allTrafficData, count: totalItemsCount, error: trafficError } = await trafficQuery;
@@ -182,20 +198,23 @@ async function searchItems(queryParams) {
   // 必要なページングされたデータを取得
   const { data: trafficData } = await trafficQuery.range(numericOffset, numericOffset + numericLimit - 1);
 
-  const { data: ordersData, error: ordersError } = await getOrdersForMonth(user_id, report_month);
+  const { data: ordersData, error: ordersError } = await getOrdersForMonth(user_id, report_month, listing_title);
 
   if (ordersError) {
     console.error(`Error fetching orders: ${ordersError.message}`);
     throw new Error(`Error fetching orders: ${ordersError.message}`);
   }
 
+
   const { filteredOrders, orderSummary } = await filterOrdersByCategory(ordersData, category_id);
+
+  console.log("averageProfitMargin",orderSummary.averageProfitMargin)
 
   const summary = {
     totalListings: totalItemsCount,
     salesQty: orderSummary.salesQty,
     totalRevenue: orderSummary.totalSubtotal,
-    averageProfitMargin: orderSummary.averageProfit,
+    averageProfitMargin: orderSummary.averageProfitMargin,
     averagePrice: orderSummary.averagePrice,
     averageProfit: orderSummary.averageProfit,
     totalProfit: orderSummary.totalProfit,
@@ -209,7 +228,6 @@ async function searchItems(queryParams) {
 
   if (summary.salesQty > 0) {
     summary.averagePrice = summary.totalRevenue / summary.salesQty;
-    summary.averageProfitMargin = (summary.totalProfit / summary.salesQty) * 100;
     summary.sellThroughRate = (orderSummary.salesQty / summary.totalListings) * 100 || 0;
   }
 
