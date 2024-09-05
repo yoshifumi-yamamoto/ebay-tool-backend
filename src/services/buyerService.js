@@ -5,7 +5,8 @@ async function getBuyersByUserId(userId) {
   const { data, error } = await supabase
       .from('buyers')
       .select('*')
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .order('last_purchase_date', { ascending: false }); // 降順でソート
   if (error) throw new Error('Failed to retrieve buyers: ' + error.message);
   return data;
 }
