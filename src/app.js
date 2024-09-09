@@ -125,6 +125,24 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
   // CronJobの開始
   runSyncApiJob.start();
 
+    // 毎週月曜日の深夜1時にsync-ended-listings APIを実行するCronJob
+    const runSyncEndedListingsApiJob = new CronJob('0 1 * * 1', () => {
+      exec('curl -X GET "http://localhost:3000/api/listings/sync-ended-listings?userId=2"', (error, stdout, stderr) => {
+          if (error) {
+              console.error(`Error executing sync API: ${error}`);
+              return;
+          }
+          if (stderr) {
+              console.error(`Error output: ${stderr}`);
+              return;
+          }
+          console.log(`Sync API response: ${stdout}`);
+      });
+  }, null, true, 'Asia/Tokyo');
+
+  // CronJobの開始
+  runSyncEndedListingsApiJob.start();
+
   // 毎週月曜日の7時にChatworkのAPIを実行するCronJob
   const runChatworkApiJob = new CronJob('0 7 * * 1', () => {
     exec('curl -X GET "http://localhost:3000/api/chatwork/last-week-orders/2"', (error, stdout, stderr) => {

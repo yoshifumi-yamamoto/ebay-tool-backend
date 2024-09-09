@@ -48,6 +48,8 @@ async function syncListingsForUser(userId) {
           console.log(`Supabase writes took ${supabaseEndTime - supabaseStartTime}ms`); // Supabase書き込み時間をログに出力
 
           const totalPages = Math.ceil(firstPageData.totalEntries / 100);
+          console.log("ebay_user_id sync", ebayUserId)
+          console.log("totalPages", totalPages)
 
           for (let pageNumber = 2; pageNumber <= totalPages; pageNumber++) {
               // API呼び出しの時間計測
@@ -148,11 +150,100 @@ async function updateItemsTableWithListings(listings, ebayUserId, failedItems) {
   }
 }
 
+async function updateSupabaseWithEndedListings(userId) {
+    const { data: accounts, error: accountsError } = await supabase
+    .from('accounts')
+    .select('refresh_token, ebay_user_id')
+    .eq('user_id', userId);
 
+    if (accountsError) {
+        console.error('Error fetching accounts from Supabase:', accountsError.message);
+        throw new Error('Failed to fetch accounts from database');
+    }
+
+    if (accounts.length === 0) {
+        throw new Error('No eBay accounts found for the given user ID');
+    }
+
+    let apiCallCount = 0; // API呼び出し回数をカウント
+    let totalWritesToSupabase = 0; // Supabaseへの書き込み回数をカウント
+    let activeCount = 0; // Activeリスティングの件数
+    let unsoldCount = 0; // Unsoldリスティングの件数
+
+    for (const account of accounts) {
+        const refreshToken = account.refresh_token;
+        const ebayUserId = account.ebay_user_id;
+        const failedItems = []; // 失敗したitemIdを格納する配列
+
+        try {
+            const authToken = await ebayApi.refreshEbayToken(refreshToken);
+            
+            // API呼び出しの時間計測開始
+            const apiStartTime = Date.now();
+            const firstPageData = await ebayApi.fetchEndedListings(authToken, 1, 100);
+            apiCallCount++; // API呼び出し回数をインクリメント
+            const apiEndTime = Date.now();
+            console.log(`API call took ${apiEndTime - apiStartTime}ms`); // API呼び出し時間をログに出力
+
+            const listings = firstPageData.listings;
+
+            // Supabase書き込みの時間計測開始
+            const supabaseStartTime = Date.now();
+            const writeResults = await updateItemsTableWithListings(listings, ebayUserId, failedItems);
+            totalWritesToSupabase += writeResults.totalWrites;
+            activeCount += writeResults.activeWrites;
+            unsoldCount += writeResults.unsoldWrites;
+            const supabaseEndTime = Date.now();
+            console.log(`Supabase writes took ${supabaseEndTime - supabaseStartTime}ms`); // Supabase書き込み時間をログに出力
+
+            const totalPages = Math.ceil(firstPageData.totalEntries / 100);
+            console.log("ebay_user_id sync", ebayUserId)
+            console.log("totalPages", totalPages)
+
+            for (let pageNumber = 2; pageNumber <= totalPages; pageNumber++) {
+                // API呼び出しの時間計測
+                const pageApiStartTime = Date.now();
+                const pageData = await ebayApi.fetchEndedListings(authToken, pageNumber, 100);
+                apiCallCount++; // API呼び出し回数をインクリメント
+                const pageApiEndTime = Date.now();
+                console.log(`API call (page ${pageNumber}) took ${pageApiEndTime - pageApiStartTime}ms`);
+
+                const pageListings = pageData.listings;
+
+                // Supabase書き込みの時間計測
+                const pageSupabaseStartTime = Date.now();
+                const pageWriteResults = await updateItemsTableWithListings(pageListings, ebayUserId, failedItems);
+                totalWritesToSupabase += pageWriteResults.totalWrites;
+                activeCount += pageWriteResults.activeWrites;
+                unsoldCount += pageWriteResults.unsoldWrites;
+                const pageSupabaseEndTime = Date.now();
+                console.log(`Supabase writes (page ${pageNumber}) took ${pageSupabaseEndTime - pageSupabaseStartTime}ms`);
+            }
+        } catch (error) {
+            console.error('Error during token refresh or fetching listings:', error.message);
+        }
+
+        // アカウントごとに失敗したアイテムIDを出力
+        if (failedItems.length > 0) {
+            console.error(`Failed to update items for eBay user ID ${ebayUserId}: ${failedItems.join(', ')}`);
+        } else {
+            console.log(`All items updated successfully for eBay user ID ${ebayUserId}.`);
+        }
+    }
+
+    // API呼び出し回数とSupabaseへの書き込み回数をログに出力
+    console.log(`Total API calls: ${apiCallCount}`);
+    console.log(`Total writes to Supabase: ${totalWritesToSupabase}`);
+    console.log(`Active listings written to Supabase: ${activeCount}`);
+    console.log(`Unsold listings written to Supabase: ${unsoldCount}`);
+
+  }
+  
 
 
 
 
 module.exports = {
     syncListingsForUser,
+    updateSupabaseWithEndedListings
 };
