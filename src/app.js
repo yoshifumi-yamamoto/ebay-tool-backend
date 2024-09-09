@@ -159,6 +159,39 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
   }, null, true, 'Asia/Tokyo');
 
   runChatworkApiJob.start();
+
+  // スプレッドシートのデータを同期する
+  const runSyncSheetJob = new CronJob('0 6,12,18 * * *', () => {
+    console.log('Starting sync-sheet API call...');
+    exec('curl -X POST "http://localhost:3000/api/sheets/sync-sheet" -H "Content-Type: application/json" -d \'{"userId": 2}\'', (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Error executing sync-sheet API: ${error}`);
+        return;
+      }
+      if (stderr) {
+        console.error(`Error output from sync-sheet API: ${stderr}`);
+        return;
+      }
+      console.log(`sync-sheet API response: ${stdout}`);
+
+      // sync-sheetが完了した後にsync-all-ebay-dataを実行
+      console.log('Starting sync-all-ebay-data API call...');
+      exec('curl -X GET "http://localhost:3000/api/orders/sync-all-ebay-data/user/2"', (error, stdout, stderr) => {
+        if (error) {
+          console.error(`Error executing sync-all-ebay-data API: ${error}`);
+          return;
+        }
+        if (stderr) {
+          console.error(`Error output from sync-all-ebay-data API: ${stderr}`);
+          return;
+        }
+        console.log(`sync-all-ebay-data API response: ${stdout}`);
+      });
+    });
+  }, null, true, 'Asia/Tokyo');
+
+  // スケジュールジョブの開始
+  runSyncSheetJob.start();
 }
 
 module.exports = app;
