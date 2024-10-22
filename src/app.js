@@ -32,7 +32,7 @@ const { CronJob } = require('cron');
 const { exec } = require('child_process');
 
 // 許可するオリジンのリスト
-const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.vercel.app'];
+const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.vercel.app', 'https://4b15-126-158-234-2.ngrok-free.app'];
 
 const corsOptions = {
   origin: (origin, callback) => {
@@ -166,11 +166,9 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
     exec('curl -X POST "http://localhost:3000/api/sheets/sync-sheet" -H "Content-Type: application/json" -d \'{"userId": 2}\'', (error, stdout, stderr) => {
       if (error) {
         console.error(`Error executing sync-sheet API: ${error}`);
-        return;
       }
       if (stderr) {
         console.error(`Error output from sync-sheet API: ${stderr}`);
-        return;
       }
       console.log(`sync-sheet API response: ${stdout}`);
 

@@ -3,6 +3,7 @@ const supabase = require('../supabaseClient');
 const { fetchEbayAccountTokens, refreshEbayToken } = require("./accountService")
 const { fetchItemDetails } = require("./itemService")
 const { upsertBuyer } = require('./buyerService');
+const { logError } = require('./loggingService');
 
 async function fetchOrdersFromEbay(refreshToken) {
     try {
@@ -202,10 +203,35 @@ async function saveOrdersAndBuyers(userId) {
                     console.log("itemsMap",itemsMap)
                     console.log("order.orderId,",order.orderId)
                     console.error('注文処理エラー:', error);
+                    // itemIdを利用できる場合はログに追加
+                    const itemId = error?.item?.ItemID?.[0] || 'N/A';
+
+                    await logError({
+                        itemId: itemId,  // itemIdをログに追加
+                        errorType: 'API_ERROR',
+                        errorMessage: error.message,
+                        attemptNumber: 1,  // 任意のリトライ回数を指定可能
+                        additionalInfo: {
+                            functionName: 'saveOrdersAndBuyers',
+                        }
+                    });
+                    
                 }
             }
         } catch (error) {
             console.error('注文の取得または処理の失敗:', error);
+                // itemIdを利用できる場合はログに追加
+            const itemId = error?.item?.ItemID?.[0] || 'N/A';
+
+            await logError({
+                itemId: itemId,  // itemIdをログに追加
+                errorType: 'API_ERROR',
+                errorMessage: error.message,
+                attemptNumber: 1,  // 任意のリトライ回数を指定可能
+                additionalInfo: {
+                    functionName: 'saveOrdersAndBuyers',
+                }
+            });
         }
     }
 }

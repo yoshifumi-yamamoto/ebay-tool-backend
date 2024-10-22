@@ -18,6 +18,7 @@
   },
   "homepage": "https://github.com/yoshifumi-yamamoto/ebay-tool-backend#readme",
   "dependencies": {
+    "@google-cloud/logging": "^11.2.0",
     "@supabase/supabase-js": "^2.42.4",
     "axios": "^1.6.8",
     "bcryptjs": "^2.4.3",

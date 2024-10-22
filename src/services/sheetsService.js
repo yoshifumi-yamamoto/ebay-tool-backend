@@ -2,6 +2,7 @@ const { google } = require('googleapis');
 const { join } = require('path');
 const supabase = require('../supabaseClient');
 require('dotenv').config(); // .envファイルを読み込む
+const { logError } = require('./loggingService');
 
 // サービスアカウントキーのパス
 const SERVICE_ACCOUNT_FILE = join(__dirname, '../../credentials/service-account-key.json');
@@ -118,9 +119,28 @@ async function saveItems(items, userId) {
                         if (itemError) {
                             console.log("Error upserting item:", item);
                             console.log("Item error:", itemError.message);
+                            await logError({
+                                itemId: item,  // itemIdをログに追加
+                                errorType: 'API_ERROR',
+                                errorMessage: error.message,
+                                attemptNumber: 1,  // 任意のリトライ回数を指定可能
+                                additionalInfo: {
+                                    functionName: 'saveItems',
+                                }
+                            });
                         }
                     } catch (innerError) {
                         console.error("Unexpected error during individual upsert:", innerError.message);
+
+                        await logError({
+                            itemId: "NA",  // itemIdをログに追加
+                            errorType: 'API_ERROR',
+                            errorMessage: error.message,
+                            attemptNumber: 1,  // 任意のリトライ回数を指定可能
+                            additionalInfo: {
+                                functionName: 'saveItems',
+                            }
+                        });
                     }
                 }
                 throw error;
