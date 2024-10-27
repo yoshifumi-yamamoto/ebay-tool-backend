@@ -178,7 +178,49 @@ async function updateTrafficFromCSV(fileBuffer, report_month, ebay_user_id, user
         });
 }
 
+async function updateActiveListingsCSV(fileBuffer) {
+    const results = [];
+
+    // CSVの読み込み
+    fileBuffer
+        .pipe(csv({
+            mapHeaders: ({ header }) => header.trim().replace(/^"|"$/g, '').replace(/^\uFEFF/, '')
+        }))
+        .on('data', (data) => {
+            if (results.length === 0) {
+                console.log('Headers:', Object.keys(data)); // ヘッダー名を出力
+            }
+            results.push(data);
+        })
+        .on('end', async () => {
+            const updates = results.map(row => ({
+                ebay_item_id: row['Item number'], // eBayのアイテムID
+                listing_status: 'ACTIVE' // ステータスを「ACTIVE」に設定
+            })).filter(update => update.ebay_item_id);
+
+            // Supabaseにバッチ更新
+            const batchSize = 100; // バッチサイズ
+            for (let i = 0; i < updates.length; i += batchSize) {
+                const batch = updates.slice(i, i + batchSize);
+                const { error } = await supabase
+                    .from('items')
+                    .update({ listing_status: 'ACTIVE' })
+                    .in('ebay_item_id', batch.map(item => item.ebay_item_id));
+
+                if (error) {
+                    console.error(`Error updating batch ${Math.ceil((i + 1) / batchSize)}:`, error.message);
+                } else {
+                    console.log(`Batch ${Math.ceil((i + 1) / batchSize)} updated successfully.`);
+                }
+            }
+
+            console.log('CSV processing for active listings completed.');
+        });
+}
+
+
 module.exports = {
     updateCategoriesFromCSV,
     updateTrafficFromCSV,
+    updateActiveListingsCSV
 };

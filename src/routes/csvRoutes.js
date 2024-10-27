@@ -15,5 +15,12 @@ router.post('/upload', upload.single('file'), (req, res, next) => {
   next(); // 次のミドルウェアへ
 }, csvController.processCSVUpload);
 
+// ファイルアップロードのルート
+router.post('/upload-acrive-listings', upload.single('file'), (req, res, next) => {
+  console.log('Received request body:', req.body);
+  console.log('Received file:', req.file);
+  next(); // 次のミドルウェアへ
+}, csvController.processActiveListingsCSVUpload);
+
 
 module.exports = router;

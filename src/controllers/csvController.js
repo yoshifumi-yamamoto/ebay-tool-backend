@@ -1,4 +1,4 @@
-const { updateCategoriesFromCSV, updateTrafficFromCSV } = require('../services/csvService');
+const { updateCategoriesFromCSV, updateTrafficFromCSV, updateActiveListingsCSV } = require('../services/csvService');
 const { Readable } = require('stream');
 
 const processCSVUpload = async (req, res) => {
@@ -55,6 +55,45 @@ const processCSVUpload = async (req, res) => {
     }
 };
 
+const processActiveListingsCSVUpload = async (req, res) => {
+    const { ebay_user_id, user_id } = req.body;
+    console.log('Inside processCSVUpload');
+
+    const file = req.file;
+
+    // 追加のデバッグ用ログ
+    console.log('ebay_user_id:', ebay_user_id);
+    console.log('user_id:', user_id);
+
+    if (!file) {
+        console.error('No file uploaded');
+        return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    if (!user_id) {
+        console.error('user_id is required');
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    if (!ebay_user_id) {
+        console.error('ebay_user_id is required');
+        return res.status(400).json({ error: 'ebay_user_id is required' });
+    }
+
+    try {
+        const bufferStream = new Readable();
+        bufferStream.push(file.buffer);
+        bufferStream.push(null);
+
+        await updateActiveListingsCSV(bufferStream, ebay_user_id, user_id);
+
+    } catch (error) {
+        console.error(`Error processActiveListingsCSVUpload :`, error.message);
+        res.status(500).json({ error: `Error processActiveListingsCSVUpload` });
+    }
+};
+
 module.exports = {
     processCSVUpload,
+    processActiveListingsCSVUpload,
 };
