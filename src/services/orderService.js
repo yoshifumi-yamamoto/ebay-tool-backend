@@ -54,9 +54,11 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
         let itemImage = existingImages[item.legacyItemId];
         if (!itemImage) {
             try {
+
                 const itemDetails = await fetchItemDetails(item.legacyItemId, accessToken);
-                itemImage = itemDetails ? itemDetails.PictureURL : null;
+                itemImage = itemDetails ? itemDetails.PictureDetails.PictureURL[0] : null;
             } catch (error) {
+
                 console.error('商品画像の取得エラー:', error.message);
                 itemImage = null;
             }
@@ -160,6 +162,7 @@ async function saveOrdersAndBuyers(userId) {
             const existingImages = {};
             existingOrders.forEach(order => {
                 order.line_items.forEach(item => {
+
                     if (item.itemImage) {
                         existingImages[item.legacyItemId] = item.itemImage;
                     }

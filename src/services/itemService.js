@@ -80,34 +80,37 @@ const processDataAndFetchMatchingItems = async (octoparseData, ebayUserId) => {
 
 async function fetchItemDetails(legacyItemId, authToken) {
     try {
-        const response = await axios.get('https://open.api.ebay.com/shopping', {
-            headers: {
-                'X-EBAY-API-IAF-TOKEN': authToken // ここにあなたの認証トークンを指定してください
-            },
-            params: {
-                callname: 'GetSingleItem',
-                responseencoding: 'JSON',
-                appid: process.env.EBAY_APP_ID, // ここにあなたのアプリIDを入力してください
-                siteid: '0',
-                version: '967',
-                ItemID: legacyItemId,
-                IncludeSelector: 'Details'
-            }
-        });
-
-        if (response.data.Item) {
-            console.log("Item details fetched:", response.data.Item);
-            return response.data.Item;
-        } else {
-            console.log("legacyItemId", legacyItemId);
-            console.error('Item not found in eBay response:', response.data);
-            return null;
+      const requestBody = `<?xml version="1.0" encoding="utf-8"?>
+  <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+    <RequesterCredentials>
+      <eBayAuthToken>${authToken}</eBayAuthToken>
+    </RequesterCredentials>
+    <ItemID>${legacyItemId}</ItemID>
+    <IncludeSelector>Details,ItemSpecifics,ShippingCosts,PictureDetails</IncludeSelector>
+  </GetItemRequest>`;
+  
+      const response = await axios.post('https://api.ebay.com/ws/api.dll', requestBody, {
+        headers: {
+          'Content-Type': 'text/xml',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+          'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID,
+          'X-EBAY-API-APP-NAME': process.env.EBAY_APP_ID,
+          'X-EBAY-API-CERT-NAME': process.env.EBAY_CERT_ID,
+          'X-EBAY-API-CALL-NAME': 'GetItem',
+          'X-EBAY-API-SITEID': '0',
         }
+      });
+  
+      const parser = new xml2js.Parser({ explicitArray: false });
+      const result = await parser.parseStringPromise(response.data);
+  
+      return result.GetItemResponse?.Item || null;
+  
     } catch (error) {
-        console.error('Error fetching item details from eBay:', error.response ? error.response.data : error.message);
-        throw new Error('Failed to fetch item details from eBay');
+      console.error('❌ eBay API error:', error.response?.data || error.message);
+      throw new Error('Failed to fetch item details from eBay');
     }
-}
+  }
 
 async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 100) {
     try {
