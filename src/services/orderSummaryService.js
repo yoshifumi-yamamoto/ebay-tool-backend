@@ -83,6 +83,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
   return { orders: ordersWithProfit, totalOrders: count };
 };
 
+
 exports.fetchOrderSummary = async (filters) => {
   const { user_id, start_date, end_date, ebay_user_id, status, buyer_country_code, researcher } = filters;
 
@@ -92,9 +93,9 @@ exports.fetchOrderSummary = async (filters) => {
 
   let query = supabase
     .from('orders')
-    .select('earnings_after_pl_fee, subtotal, shipping_cost, line_items, researcher, line_items')
-    .eq('user_id', user_id) // 必須フィルタとしてuser_idを追加
-    .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
+    .select('earnings_after_pl_fee, subtotal, shipping_cost, line_items, researcher') // ← line_itemsを含める
+    .eq('user_id', user_id)
+    .neq('status', 'FULLY_REFUNDED')
     .gte('order_date', start_date)
     .lte('order_date', end_date);
 
@@ -104,7 +105,6 @@ exports.fetchOrderSummary = async (filters) => {
   if (researcher) query = query.eq('researcher', researcher);
 
   const { data, error } = await query;
-
   if (error) throw error;
 
   const totalSales = data.reduce((sum, order) => sum + order.earnings_after_pl_fee, 0);
@@ -117,12 +117,12 @@ exports.fetchOrderSummary = async (filters) => {
   const profitMargin = (totalProfit / (totalSales * 0.98 * DOLLAR_TO_YEN_RATE)) * 100;
 
   const researcherIncentives = data.reduce((acc, order) => {
-    const { researcher, earnings_after_pl_fee } = order;
+    const { researcher } = order;
     if (researcher) {
       const { profit } = calculateProfitAndMargin(order);
-      const incentive = profit * 0.1; // 仮のインセンティブ率 10%
+      const incentive = profit * 0.1;
       if (!acc[researcher]) acc[researcher] = 0;
-      acc[researcher] += Math.max(incentive, 0); // インセンティブがマイナスの場合は0を返す
+      acc[researcher] += Math.max(incentive, 0);
     }
     return acc;
   }, {});
@@ -136,6 +136,8 @@ exports.fetchOrderSummary = async (filters) => {
     researcher_incentives: researcherIncentives,
   };
 };
+
+
 
 // csvダウンロード機能
 exports.downloadOrderSummaryCSV = async (filters) => {

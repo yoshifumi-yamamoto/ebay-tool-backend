@@ -9,8 +9,12 @@ exports.fetchListingsSummary = async (filters) => {
     .from('items')
     .select('exhibit_date, research_date, researcher, exhibitor, ebay_user_id')
     .eq('user_id', user_id)
-    .or(`exhibit_date.gte.${start_date},exhibit_date.lte.${end_date}`)
-    .or(`research_date.gte.${start_date},research_date.lte.${end_date}`);
+    // .or(`exhibit_date.gte.${start_date},exhibit_date.lte.${end_date}`)
+    // .or(`research_date.gte.${start_date},research_date.lte.${end_date}`);
+    .or(
+      `and(exhibit_date.gte.${start_date},exhibit_date.lte.${end_date}),and(research_date.gte.${start_date},research_date.lte.${end_date})`
+    )
+    
 
   const { data: itemsData, error: itemsError } = await itemsQuery;
   if (itemsError) {
@@ -32,23 +36,31 @@ exports.fetchListingsSummary = async (filters) => {
   }
 
   // 出品件数とリサーチ件数を集計
-  const listingsSummary = itemsData.reduce((acc, item) => {
+  const listingsSummary = {};
+  let totalExhibitCount = 0;
+  const accountSummary = {};
+
+  for (const item of itemsData) {
     const { researcher, exhibitor, exhibit_date, research_date, ebay_user_id } = item;
 
+    // 出品カウント
     if (exhibit_date && exhibit_date >= start_date && exhibit_date <= end_date) {
-      if (!acc[exhibitor]) acc[exhibitor] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
-      acc[exhibitor].exhibitCount++;
+      if (!listingsSummary[exhibitor]) listingsSummary[exhibitor] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
+      listingsSummary[exhibitor].exhibitCount++;
+
+      totalExhibitCount++;
+
+      if (!accountSummary[ebay_user_id]) accountSummary[ebay_user_id] = 0;
+      accountSummary[ebay_user_id]++;
     }
 
+    // リサーチカウント
     if (research_date && research_date >= start_date && research_date <= end_date) {
-      if (!acc[researcher]) acc[researcher] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
-      acc[researcher].researchCount++;
+      if (!listingsSummary[researcher]) listingsSummary[researcher] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
+      listingsSummary[researcher].researchCount++;
     }
+  }
 
-    return acc;
-  }, {});
-
-  // 販売件数を集計
   ordersData.forEach(order => {
     const { researcher } = order;
     if (!listingsSummary[researcher]) {
@@ -57,24 +69,6 @@ exports.fetchListingsSummary = async (filters) => {
     listingsSummary[researcher].salesCount++;
   });
 
-  // 全アカウントの合計出品数を集計
-  const totalExhibitCount = itemsData.reduce((acc, item) => {
-    const { exhibit_date } = item;
-    if (exhibit_date && exhibit_date >= start_date && exhibit_date <= end_date) {
-      acc++;
-    }
-    return acc;
-  }, 0);
-
-  // 各アカウントの出品数を集計
-  const accountSummary = itemsData.reduce((acc, item) => {
-    const { exhibit_date, ebay_user_id } = item;
-    if (exhibit_date && exhibit_date >= start_date && exhibit_date <= end_date) {
-      if (!acc[ebay_user_id]) acc[ebay_user_id] = 0;
-      acc[ebay_user_id]++;
-    }
-    return acc;
-  }, {});
 
   return { listingsSummary, totalExhibitCount, accountSummary };
 };
