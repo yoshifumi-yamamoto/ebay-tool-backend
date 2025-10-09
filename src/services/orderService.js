@@ -75,6 +75,140 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
 }
 
 /**
+ * 注文明細をorder_line_itemsテーブルにアップサートする
+ * @param {Object} order - eBay注文データ
+ * @param {Array} lineItems - 加工済みラインアイテム
+ * @param {string} researcher - リサーチ担当者
+ */
+async function upsertOrderLineItems(order, lineItems, researcher) {
+    if (!lineItems?.length) {
+        return;
+    }
+
+    const lineItemIds = lineItems.map((item) => item.lineItemId);
+    const { data: existingLineItems, error: fetchError } = await supabase
+        .from('order_line_items')
+        .select('id, procurement_tracking_number, procurement_url, procurement_status')
+        .in('id', lineItemIds);
+
+    if (fetchError && fetchError.code !== 'PGRST116') {
+        console.error('order_line_items取得時のエラー:', fetchError.message);
+    }
+
+    const existingMap = {};
+    existingLineItems?.forEach((item) => {
+        existingMap[item.id] = item;
+    });
+
+    const toNumber = (value) => {
+        if (value === undefined || value === null) {
+            return null;
+        }
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const records = lineItems.map((item) => {
+        const existing = existingMap[item.lineItemId] || {};
+        return {
+            id: item.lineItemId,
+            order_no: order.orderId,
+            legacy_item_id: item.legacyItemId || null,
+            title: item.title || null,
+            quantity: item.quantity ?? null,
+            total_value: toNumber(item.total?.value),
+            total_currency: item.total?.currency || null,
+            line_item_cost_value: toNumber(item.lineItemCost?.value),
+            line_item_cost_currency: item.lineItemCost?.currency || null,
+            cost_price: toNumber(item.cost_price),
+            item_image: item.itemImage || null,
+            stocking_url: item.stocking_url || null,
+            researcher: researcher || item.researcher || null,
+            procurement_tracking_number: existing.procurement_tracking_number || null,
+            procurement_url: existing.procurement_url || item.stocking_url || null,
+            procurement_status: existing.procurement_status || null,
+            updated_at: new Date().toISOString()
+        };
+    });
+
+    const { error: upsertError } = await supabase
+        .from('order_line_items')
+        .upsert(records, { onConflict: 'id' });
+
+    if (upsertError) {
+        console.error('order_line_itemsへのアップサートエラー:', upsertError.message);
+    }
+}
+
+/**
+ * 注文明細の仕入ステータスを更新する
+ * @param {string} lineItemId - eBay lineItemId
+ * @param {string} status - 更新後の仕入ステータス
+ */
+async function updateProcurementStatus(lineItemId, status) {
+    const { data, error } = await supabase
+        .from('order_line_items')
+        .update({
+            procurement_status: status,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', lineItemId)
+        .select();
+
+    if (error) {
+        throw new Error('Failed to update procurement status: ' + error.message);
+    }
+
+    return data?.[0] || null;
+}
+
+/**
+ * 注文明細の追跡番号を更新する
+ * @param {string} lineItemId - eBay lineItemId
+ * @param {string|null} trackingNumber - 追跡番号
+ */
+async function updateProcurementTrackingNumber(lineItemId, trackingNumber) {
+    const { data, error } = await supabase
+        .from('order_line_items')
+        .update({
+            procurement_tracking_number: trackingNumber,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', lineItemId)
+        .select();
+
+    if (error) {
+        throw new Error('Failed to update procurement tracking number: ' + error.message);
+    }
+
+    return data?.[0] || null;
+}
+
+/**
+ * 複数の注文を発送済みに更新する
+ * @param {Array<string>} orderIds - ordersテーブルのidリスト
+ */
+async function markOrdersAsShipped(orderIds) {
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+        return [];
+    }
+
+    const { data, error } = await supabase
+        .from('orders')
+        .update({
+            shipping_status: 'SHIPPED'
+        })
+        .in('id', orderIds)
+        .select('id, order_no, shipping_status');
+
+    if (error) {
+        throw new Error('Failed to update shipping status: ' + error.message);
+    }
+
+    return data || [];
+}
+
+/**
  * 注文情報をSupabaseにアップサートする関数
  * @param {Object} order - 注文の詳細を含む注文オブジェクト
  * @param {number} buyerId - バイヤーID
@@ -200,6 +334,8 @@ async function saveOrdersAndBuyers(userId) {
                     const shippingCost = itemsMap[lineItems[0].legacyItemId]?.shipping_cost || 0
 
                     const researcher = itemsMap[lineItems[0].legacyItemId]?.researcher || ""
+
+                    await upsertOrderLineItems(order, lineItems, researcher);
                     
                     await updateOrderInSupabase(order, buyer.id, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher);
                 } catch (error) {
@@ -244,7 +380,7 @@ async function saveOrdersAndBuyers(userId) {
 async function getOrdersByUserId (userId) {
     let { data: orders, error } = await supabase
         .from('orders')
-        .select('*')
+        .select('*, order_line_items(*)')
         .eq('user_id', userId);
 
     if (error) throw new Error('Failed to fetch orders: ' + error.message);
@@ -255,11 +391,12 @@ async function getOrdersByUserId (userId) {
 async function fetchRelevantOrders(userId) {
     const { data, error } = await supabase
         .from('orders')
-        .select('*')
+        .select('*, order_line_items(*)')
         .eq('user_id', userId)
         .or('shipping_status.neq.SHIPPED,delivered_msg_status.neq.SEND')
         .neq('status', 'FULLY_REFUNDED')
-        .order('order_date', { ascending: false });
+        .order('order_date', { ascending: false })
+        .order('created_at', { ascending: true, foreignTable: 'order_line_items' });
 
     if (error) {
         console.error('Error fetching relevant orders:', error.message);
@@ -341,11 +478,12 @@ async function fetchLastWeekOrders(userId) {
     const { start, end } = getLastWeekDateRange();
     const { data: orders, error: ordersError } = await supabase
         .from('orders')
-        .select('*')
+        .select('*, order_line_items(*)')
         .eq('user_id', userId)
         .gte('order_date', start.toISOString())
         .lte('order_date', end.toISOString())
-        .order('order_date', { ascending: false });
+        .order('order_date', { ascending: false })
+        .order('created_at', { ascending: true, foreignTable: 'order_line_items' });
 
     if (ordersError) {
         console.error('Error fetching last week orders:', ordersError.message);
@@ -390,5 +528,8 @@ module.exports = {
   getOrdersByUserId,
   fetchRelevantOrders,
   updateOrder,
-  fetchLastWeekOrders
+  fetchLastWeekOrders,
+  updateProcurementStatus,
+  updateProcurementTrackingNumber,
+  markOrdersAsShipped
 };

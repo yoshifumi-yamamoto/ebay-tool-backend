@@ -48,7 +48,7 @@ const fetchMatchingItems = async (octoparseData, ebayUserId) => {
     const matchingItems = {};
     console.log("fetchMatchingItems");
 
-    for (let i = 0; i < Math.min(octoparseData.length, batchSize); i += batchSize) {
+    for (let i = 0; i < octoparseData.length; i += batchSize) {
         const batch = octoparseData.slice(i, i + batchSize);
         const urls = batch.map(data => data.URL || data["店铺URL"]);
 
@@ -80,37 +80,67 @@ const processDataAndFetchMatchingItems = async (octoparseData, ebayUserId) => {
 
 async function fetchItemDetails(legacyItemId, authToken) {
     try {
-      const requestBody = `<?xml version="1.0" encoding="utf-8"?>
-  <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+        console.log(`🔹 開始: GetItem 呼び出し (ItemID: ${legacyItemId})`);
+
+        const requestBody = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
     <RequesterCredentials>
-      <eBayAuthToken>${authToken}</eBayAuthToken>
+        <eBayAuthToken>${authToken}</eBayAuthToken>
     </RequesterCredentials>
     <ItemID>${legacyItemId}</ItemID>
     <IncludeSelector>Details,ItemSpecifics,ShippingCosts,PictureDetails</IncludeSelector>
-  </GetItemRequest>`;
-  
-      const response = await axios.post('https://api.ebay.com/ws/api.dll', requestBody, {
-        headers: {
-          'Content-Type': 'text/xml',
-          'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-          'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID,
-          'X-EBAY-API-APP-NAME': process.env.EBAY_APP_ID,
-          'X-EBAY-API-CERT-NAME': process.env.EBAY_CERT_ID,
-          'X-EBAY-API-CALL-NAME': 'GetItem',
-          'X-EBAY-API-SITEID': '0',
+</GetItemRequest>`;
+
+        const response = await axios.post('https://api.ebay.com/ws/api.dll', requestBody, {
+            headers: {
+                'Content-Type': 'text/xml',
+                'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+                'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID,
+                'X-EBAY-API-APP-NAME': process.env.EBAY_APP_ID,
+                'X-EBAY-API-CERT-NAME': process.env.EBAY_CERT_ID,
+                'X-EBAY-API-CALL-NAME': 'GetItem',
+                'X-EBAY-API-SITEID': '0',
+            }
+        });
+
+        console.log(`✅ GetItem レスポンス受信 (HTTPステータス: ${response.status})`);
+        if (response.status !== 200) {
+            console.error(`❌ HTTP エラー: ステータス ${response.status}`);
+            throw new Error(`HTTP error: ${response.status}`);
         }
-      });
-  
-      const parser = new xml2js.Parser({ explicitArray: false });
-      const result = await parser.parseStringPromise(response.data);
-  
-      return result.GetItemResponse?.Item || null;
-  
+
+        const parser = new xml2js.Parser({ explicitArray: false });
+        const result = await parser.parseStringPromise(response.data);
+
+        if (!result.GetItemResponse) {
+            console.error('❌ eBay API エラー: GetItemResponse が存在しません');
+            console.log('レスポンス全文:', response.data);
+            throw new Error('GetItemResponse not found');
+        }
+
+        const item = result.GetItemResponse.Item;
+        if (!item) {
+            console.error('❌ eBay API エラー: Item が存在しません');
+            console.log('レスポンス全文:', JSON.stringify(result.GetItemResponse, null, 2));
+            throw new Error('Item not found in GetItemResponse');
+        }
+
+        console.log(`📌 Item タイトル: ${item.Title || 'タイトルなし'}`);
+        console.log(`📌 画像URL:`, item.PictureDetails?.PictureURL || '画像情報なし');
+
+        return item;
+
     } catch (error) {
-      console.error('❌ eBay API error:', error.response?.data || error.message);
-      throw new Error('Failed to fetch item details from eBay');
+        console.error(`❌ GetItem 実行中エラー: ${error.message}`);
+        if (error.response) {
+            console.log('エラー時レスポンスデータ:', error.response.data);
+        }
+        throw error;
     }
-  }
+}
+
+
+
 
 async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 100) {
     try {
@@ -147,14 +177,13 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
         const parser = new xml2js.Parser();
         const result = await parser.parseStringPromise(response.data);
 
-        const activeList = result.GetMyeBaySellingResponse.ActiveList?.[0]?.ItemArray?.[0]?.Item;
-
+        const activeList = result.GetMyeBaySellingResponse.ActiveList?.ItemArray?.Item;
         if (!activeList) {
             throw new Error('ActiveList not found in eBay API response');
         }
+        const itemIds = Array.isArray(activeList) ? activeList.map(item => item.ItemID) : [activeList.ItemID];
+        const totalEntries = parseInt(result.GetMyeBaySellingResponse.ActiveList.PaginationResult.TotalNumberOfEntries, 10);
 
-        const totalEntries = parseInt(result.GetMyeBaySellingResponse.ActiveList?.[0]?.PaginationResult?.[0]?.TotalNumberOfEntries?.[0], 10);
-        const itemIds = activeList.map(item => item.ItemID[0]);
 
         return { itemIds, totalEntries };
     } catch (error) {
@@ -305,14 +334,8 @@ async function syncActiveListingsForUser(userId) {
 
 
 async function refreshEbayToken(refreshToken) {
-    let queryString;
-    try {
-        queryString = (await import('query-string')).default;
-    } catch (e) {
-        console.error('Failed to import query-string:', e);
-        throw new Error('Failed to import query-string');
-    }
-
+    
+    const queryString = require('query-string')
     const response = await axios.post('https://api.ebay.com/identity/v1/oauth2/token', queryString.stringify({
         grant_type: 'refresh_token',
         refresh_token: refreshToken,
@@ -335,5 +358,10 @@ async function refreshEbayToken(refreshToken) {
 module.exports = {
     fetchItemDetails,
     processDataAndFetchMatchingItems,
+    fetchMatchingItems,
+    formatForEbayAPI,
+    updateItemsTable,
     syncActiveListingsForUser,
+    fetchActiveListings,
+    refreshEbayToken
 };

@@ -13,6 +13,61 @@ exports.syncOrders = async (req, res) => {
     }
 };
 
+// 注文明細の仕入ステータス更新
+exports.updateProcurementStatus = async (req, res) => {
+    const { lineItemId } = req.params;
+    const { procurementStatus } = req.body;
+
+    if (!procurementStatus) {
+        return res.status(400).json({ error: 'procurementStatus is required' });
+    }
+
+    try {
+        const updated = await orderService.updateProcurementStatus(lineItemId, procurementStatus);
+        if (!updated) {
+            return res.status(404).json({ error: 'Order line item not found' });
+        }
+        res.json(updated);
+    } catch (error) {
+        console.error('Failed to update procurement status:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// 注文明細の仕入追跡番号更新
+exports.updateProcurementTrackingNumber = async (req, res) => {
+    const { lineItemId } = req.params;
+    const { procurementTrackingNumber } = req.body;
+
+    try {
+        const updated = await orderService.updateProcurementTrackingNumber(lineItemId, procurementTrackingNumber ?? null);
+        if (!updated) {
+            return res.status(404).json({ error: 'Order line item not found' });
+        }
+        res.json(updated);
+    } catch (error) {
+        console.error('Failed to update procurement tracking number:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// 発送ステータスを一括でSHIPPEDに更新
+exports.markOrdersAsShipped = async (req, res) => {
+    const { orderIds } = req.body;
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+        return res.status(400).json({ error: 'orderIds must be a non-empty array' });
+    }
+
+    try {
+        const updatedOrders = await orderService.markOrdersAsShipped(orderIds);
+        res.json({ updatedOrders });
+    } catch (error) {
+        console.error('Failed to update shipping status to SHIPPED:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
 
 // userに紐づく全注文情報の取得
 exports.getOrdersByUserId = async (req, res) => {

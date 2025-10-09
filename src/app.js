@@ -32,7 +32,16 @@ const { CronJob } = require('cron');
 const { exec } = require('child_process');
 
 // 許可するオリジンのリスト
-const allowedOrigins = ['http://localhost:3001', 'https://ebay-tool-frontend.vercel.app', 'https://4b15-126-158-234-2.ngrok-free.app'];
+const allowedOrigins = [
+  'http://localhost:3001',
+  'http://localhost:5175',
+  'https://ebay-tool-frontend.vercel.app',
+  'https://4b15-126-158-234-2.ngrok-free.app'
+];
+
+// サーバーポート（Cronの内部呼び出し用にも使用）
+const SERVER_PORT = process.env.PORT || 4321;
+const baseUrl = `http://localhost:${SERVER_PORT}`;
 
 const corsOptions = {
   origin: (origin, callback) => {
@@ -109,7 +118,7 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
 
   // 深夜1時にsync APIを実行するCronJob
   const runSyncApiJob = new CronJob('0 1 * * *', () => {
-      exec('curl -X GET "http://localhost:3000/api/listings/sync?userId=2"', (error, stdout, stderr) => {
+      exec(`curl -X GET "${baseUrl}/api/listings/sync?userId=2"`, (error, stdout, stderr) => {
           if (error) {
               console.error(`Error executing sync API: ${error}`);
               return;
@@ -127,7 +136,7 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
 
     // 毎週月曜日の深夜1時にsync-ended-listings APIを実行するCronJob
     const runSyncEndedListingsApiJob = new CronJob('0 1 * * 1', () => {
-      exec('curl -X GET "http://localhost:3000/api/listings/sync-ended-listings?userId=2"', (error, stdout, stderr) => {
+      exec(`curl -X GET "${baseUrl}/api/listings/sync-ended-listings?userId=2"`, (error, stdout, stderr) => {
           if (error) {
               console.error(`Error executing sync API: ${error}`);
               return;
@@ -145,7 +154,7 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
 
   // 毎週月曜日の7時にChatworkのAPIを実行するCronJob
   const runChatworkApiJob = new CronJob('0 7 * * 1', () => {
-    exec('curl -X GET "http://localhost:3000/api/chatwork/last-week-orders/2"', (error, stdout, stderr) => {
+    exec(`curl -X GET "${baseUrl}/api/chatwork/last-week-orders/2"`, (error, stdout, stderr) => {
         if (error) {
             console.error(`Error executing Chatwork API: ${error}`);
             return;
@@ -163,7 +172,7 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
   // スプレッドシートのデータを同期する
   const runSyncSheetJob = new CronJob('0 6,12,18 * * *', () => {
     console.log('Starting sync-sheet API call...');
-    exec('curl -X POST "http://localhost:3000/api/sheets/sync-sheet" -H "Content-Type: application/json" -d \'{"userId": 2}\'', (error, stdout, stderr) => {
+    exec(`curl -X POST "${baseUrl}/api/sheets/sync-sheet" -H "Content-Type: application/json" -d '{"userId": 2}'`, (error, stdout, stderr) => {
       if (error) {
         console.error(`Error executing sync-sheet API: ${error}`);
       }
@@ -174,7 +183,7 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
 
       // sync-sheetが完了した後にsync-all-ebay-dataを実行
       console.log('Starting sync-all-ebay-data API call...');
-      exec('curl -X GET "http://localhost:3000/api/orders/sync-all-ebay-data/user/2"', (error, stdout, stderr) => {
+      exec(`curl -X GET "${baseUrl}/api/orders/sync-all-ebay-data/user/2"`, (error, stdout, stderr) => {
         if (error) {
           console.error(`Error executing sync-all-ebay-data API: ${error}`);
           return;
