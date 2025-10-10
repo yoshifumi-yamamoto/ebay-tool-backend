@@ -1,5 +1,6 @@
 const supabase = require('../supabaseClient');
 const dayjs = require('dayjs');
+const { attachNormalizedLineItemsToOrder } = require('./orderService');
 require('dotenv').config();
 
 // 仮の為替レート
@@ -18,7 +19,7 @@ const getOrdersForMonth = async (userId, reportMonth, listing_title) => {
 
   let { data, error } = await supabase
     .from('orders')
-    .select('*')
+    .select('*, order_line_items(*)')
     .eq('user_id', userId)
     .eq('status', "PAID")
     .gte('order_date', `${reportMonth}-01`)
@@ -31,14 +32,16 @@ const getOrdersForMonth = async (userId, reportMonth, listing_title) => {
 
   // 大文字小文字を区別しないように、両方を小文字に変換して比較
   const normalizedTitle = listing_title.toLowerCase();
-  data = data.filter(order => 
+  const orders = (data || []).map(attachNormalizedLineItemsToOrder);
+
+  const filteredOrdersByTitle = orders.filter(order => 
     order.line_items.some(item => 
       item.title && item.title.toLowerCase().includes(normalizedTitle)
     )
   );
 
-  console.log('Orders fetched:', data.length);
-  return { data, error: null };
+  console.log('Orders fetched:', filteredOrdersByTitle.length);
+  return { data: filteredOrdersByTitle, error: null };
 };
 
 const getChildCategoryIdsRecursively = async (parentCategoryId) => {

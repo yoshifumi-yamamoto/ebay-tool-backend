@@ -1,11 +1,13 @@
 const { Parser } = require('json2csv');
 const supabase = require('../supabaseClient');
+const { attachNormalizedLineItemsToOrder } = require('./orderService');
 
 const DOLLAR_TO_YEN_RATE = 150; // ドル円レートを150円に設定
 
 // 利益額と利益率を計算する関数を追加
 function calculateProfitAndMargin(order) {
-  const totalCostYen = order.line_items.reduce((sum, item) => sum + (parseFloat(item.cost_price) || 0), 0) + (parseFloat(order.shipping_cost) || 0);
+  const lineItems = order.line_items || [];
+  const totalCostYen = lineItems.reduce((sum, item) => sum + (parseFloat(item.cost_price) || 0), 0) + (parseFloat(order.shipping_cost) || 0);
   const earningsAfterPLFeeYen = (order.earnings_after_pl_fee * 0.98) * DOLLAR_TO_YEN_RATE; // 手数料を引いて円に換算
   const profit = earningsAfterPLFeeYen - totalCostYen;
   const profitMargin = (profit / earningsAfterPLFeeYen) * 100; // 利益率を計算
@@ -32,7 +34,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
           status,
           buyer_country_code,
           researcher,
-          line_items,
+          order_line_items (*),
           ebay_user_id
       `)
       .eq('user_id', user_id)
@@ -54,7 +56,9 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
       throw error;
   }
 
-  const ordersWithProfit = data.map(order => {
+  const normalizedOrders = (data || []).map(attachNormalizedLineItemsToOrder);
+
+  const ordersWithProfit = normalizedOrders.map(order => {
       const { profit, profitMargin, researcherIncentive } = calculateProfitAndMargin(order);
       return { ...order, profit, profitMargin, researcherIncentive };
   });
@@ -93,7 +97,7 @@ exports.fetchOrderSummary = async (filters) => {
 
   let query = supabase
     .from('orders')
-    .select('earnings_after_pl_fee, subtotal, shipping_cost, line_items, researcher') // ← line_itemsを含める
+    .select('earnings_after_pl_fee, subtotal, shipping_cost, researcher, order_line_items(*)')
     .eq('user_id', user_id)
     .neq('status', 'FULLY_REFUNDED')
     .gte('order_date', start_date)
@@ -107,16 +111,18 @@ exports.fetchOrderSummary = async (filters) => {
   const { data, error } = await query;
   if (error) throw error;
 
-  const totalSales = data.reduce((sum, order) => sum + order.earnings_after_pl_fee, 0);
-  const totalProfit = data.reduce((sum, order) => {
+  const normalizedOrders = (data || []).map(attachNormalizedLineItemsToOrder);
+
+  const totalSales = normalizedOrders.reduce((sum, order) => sum + order.earnings_after_pl_fee, 0);
+  const totalProfit = normalizedOrders.reduce((sum, order) => {
     const { profit } = calculateProfitAndMargin(order);
     return sum + profit;
   }, 0);
-  const totalSubtotal = data.reduce((sum, order) => sum + order.subtotal, 0);
-  const totalOrders = data.length;
+  const totalSubtotal = normalizedOrders.reduce((sum, order) => sum + order.subtotal, 0);
+  const totalOrders = normalizedOrders.length;
   const profitMargin = (totalProfit / (totalSales * 0.98 * DOLLAR_TO_YEN_RATE)) * 100;
 
-  const researcherIncentives = data.reduce((acc, order) => {
+  const researcherIncentives = normalizedOrders.reduce((acc, order) => {
     const { researcher } = order;
     if (researcher) {
       const { profit } = calculateProfitAndMargin(order);

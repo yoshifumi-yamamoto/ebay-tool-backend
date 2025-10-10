@@ -74,6 +74,94 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
     }));
 }
 
+const PROCUREMENT_STATUS_ALIASES = {
+    NEW: 'NEW',
+    '新': 'NEW',
+    ORDERED: 'ORDERED',
+    '注': 'ORDERED',
+    STOCKED_SHIPPED: 'STOCKED_SHIPPED',
+    '配': 'STOCKED_SHIPPED',
+    RECEIVED: 'RECEIVED',
+    '受': 'RECEIVED',
+    OUTOFSTOCK: 'OUTOFSTOCK',
+    OUT_OF_STOCK: 'OUTOFSTOCK',
+    OUTOF_STOCK: 'OUTOFSTOCK',
+    'OUT OF STOCK': 'OUTOFSTOCK',
+    '欠': 'OUTOFSTOCK',
+    '欠品': 'OUTOFSTOCK'
+};
+
+function normalizeProcurementStatusValue(status) {
+    if (status === undefined || status === null) {
+        return null;
+    }
+    const raw = String(status).trim();
+    if (!raw) {
+        return null;
+    }
+    const upper = raw.toUpperCase();
+    if (PROCUREMENT_STATUS_ALIASES.hasOwnProperty(upper)) {
+        return PROCUREMENT_STATUS_ALIASES[upper];
+    }
+    if (PROCUREMENT_STATUS_ALIASES.hasOwnProperty(raw)) {
+        return PROCUREMENT_STATUS_ALIASES[raw];
+    }
+    return upper;
+}
+
+function normalizeOrderLineItem(item = {}) {
+    const legacyItemId = item.legacyItemId || item.legacy_item_id || null;
+    const lineItemId = item.lineItemId || item.id || null;
+    const totalValue = item.total?.value ?? item.total_value ?? null;
+    const totalCurrency = item.total?.currency ?? item.total_currency ?? null;
+    const lineItemCostValue = item.lineItemCost?.value ?? item.line_item_cost_value ?? null;
+    const lineItemCostCurrency = item.lineItemCost?.currency ?? item.line_item_cost_currency ?? null;
+    const normalizedProcurementStatus = normalizeProcurementStatusValue(
+        item.procurement_status ??
+        item.procurementStatus ??
+        item.stocking_status ??
+        item.stockingStatus ??
+        null
+    );
+
+    return {
+        ...item,
+        legacyItemId,
+        legacy_item_id: legacyItemId,
+        lineItemId,
+        id: lineItemId,
+        total: totalValue !== null ? { value: totalValue, currency: totalCurrency } : item.total || null,
+        total_value: totalValue,
+        total_currency: totalCurrency,
+        lineItemCost: lineItemCostValue !== null ? { value: lineItemCostValue, currency: lineItemCostCurrency } : item.lineItemCost || null,
+        line_item_cost_value: lineItemCostValue,
+        line_item_cost_currency: lineItemCostCurrency,
+        itemImage: item.itemImage ?? item.item_image ?? null,
+        item_image: item.item_image ?? item.itemImage ?? null,
+        procurement_tracking_number: item.procurement_tracking_number ?? item.procurementTrackingNumber ?? null,
+        procurementTrackingNumber: item.procurementTrackingNumber ?? item.procurement_tracking_number ?? null,
+        procurement_status: normalizedProcurementStatus,
+        procurementStatus: normalizedProcurementStatus,
+        stocking_status: normalizedProcurementStatus,
+        cost_price: item.cost_price ?? item.costPrice ?? null,
+        stocking_url: item.stocking_url ?? item.stockingUrl ?? null,
+        researcher: item.researcher ?? null,
+        quantity: item.quantity ?? null,
+    };
+}
+
+function attachNormalizedLineItemsToOrder(order) {
+    if (!order) {
+        return order;
+    }
+    const rawItems = order.order_line_items || order.line_items || [];
+    const normalizedItems = rawItems.map(normalizeOrderLineItem);
+    return {
+        ...order,
+        line_items: normalizedItems,
+    };
+}
+
 /**
  * 注文明細をorder_line_itemsテーブルにアップサートする
  * @param {Object} order - eBay注文データ
@@ -88,7 +176,7 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
     const lineItemIds = lineItems.map((item) => item.lineItemId);
     const { data: existingLineItems, error: fetchError } = await supabase
         .from('order_line_items')
-        .select('id, procurement_tracking_number, procurement_url, procurement_status')
+        .select('id, procurement_tracking_number, procurement_url, procurement_status, cost_price, researcher, item_image, stocking_url, total_value, total_currency, line_item_cost_value, line_item_cost_currency, quantity')
         .in('id', lineItemIds);
 
     if (fetchError && fetchError.code !== 'PGRST116') {
@@ -110,23 +198,27 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
 
     const records = lineItems.map((item) => {
         const existing = existingMap[item.lineItemId] || {};
+        const existingStatus = normalizeProcurementStatusValue(existing.procurement_status);
+        const incomingStatus = normalizeProcurementStatusValue(item.procurement_status ?? item.procurementStatus ?? item.stocking_status ?? item.stockingStatus ?? null);
+        const procurementStatus = incomingStatus ?? existingStatus ?? 'NEW';
         return {
             id: item.lineItemId,
             order_no: order.orderId,
             legacy_item_id: item.legacyItemId || null,
             title: item.title || null,
             quantity: item.quantity ?? null,
-            total_value: toNumber(item.total?.value),
-            total_currency: item.total?.currency || null,
-            line_item_cost_value: toNumber(item.lineItemCost?.value),
-            line_item_cost_currency: item.lineItemCost?.currency || null,
-            cost_price: toNumber(item.cost_price),
-            item_image: item.itemImage || null,
-            stocking_url: item.stocking_url || null,
-            researcher: researcher || item.researcher || null,
+            total_value: toNumber(item.total?.value) ?? existing.total_value ?? null,
+            total_currency: item.total?.currency || existing.total_currency || null,
+            line_item_cost_value: toNumber(item.lineItemCost?.value) ?? existing.line_item_cost_value ?? null,
+            line_item_cost_currency: item.lineItemCost?.currency || existing.line_item_cost_currency || null,
+            cost_price: toNumber(item.cost_price) ?? existing.cost_price ?? null,
+            item_image: item.itemImage || existing.item_image || null,
+            stocking_url: item.stocking_url || existing.stocking_url || null,
+            researcher: researcher || item.researcher || existing.researcher || null,
+            quantity: toNumber(item.quantity) ?? existing.quantity ?? null,
             procurement_tracking_number: existing.procurement_tracking_number || null,
             procurement_url: existing.procurement_url || item.stocking_url || null,
-            procurement_status: existing.procurement_status || null,
+            procurement_status: procurementStatus,
             updated_at: new Date().toISOString()
         };
     });
@@ -243,11 +335,6 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         buyer_country_code: order.buyer.buyerRegistrationAddress.contactAddress.countryCode,
         user_id: userId,
         ebay_user_id: order.sellerId,
-        line_items: lineItems.map((item, index) => ({
-            ...item,
-            cost_price: existingData ? existingData.line_items[index]?.cost_price : item.cost_price, // 更新しない
-            researcher: existingData ? existingData.researcher : researcher
-        })),
         ship_to: order.fulfillmentStartInstructions[0].shippingStep.shipTo,
         shipping_deadline: order.lineItems[0].lineItemFulfillmentInstructions.shipByDate,
         ebay_shipment_status: lineItemFulfillmentStatus,
@@ -285,7 +372,20 @@ async function saveOrdersAndBuyers(userId) {
 
             const { data: existingOrders, error: existingOrdersError } = await supabase
                 .from('orders')
-                .select('order_no, line_items')
+                .select(`
+                    order_no,
+                    order_line_items (
+                        id,
+                        legacy_item_id,
+                        item_image,
+                        stocking_url,
+                        cost_price,
+                        procurement_tracking_number,
+                        procurement_url,
+                        procurement_status,
+                        researcher
+                    )
+                `)
                 .in('order_no', orders.map(order => order.orderId));
 
             if (existingOrdersError) {
@@ -294,12 +394,13 @@ async function saveOrdersAndBuyers(userId) {
             }
 
             const existingImages = {};
+            const existingLineItemData = {};
             existingOrders.forEach(order => {
-                order.line_items.forEach(item => {
-
-                    if (item.itemImage) {
-                        existingImages[item.legacyItemId] = item.itemImage;
+                order.order_line_items?.forEach(item => {
+                    if (item.item_image) {
+                        existingImages[item.legacy_item_id] = item.item_image;
                     }
+                    existingLineItemData[item.id] = item;
                 });
             });
 
@@ -331,12 +432,17 @@ async function saveOrdersAndBuyers(userId) {
 
                     const lineItems = await fetchAndProcessLineItems(order, accessToken, existingImages, itemsMap);
 
-                    const shippingCost = itemsMap[lineItems[0].legacyItemId]?.shipping_cost || 0
+                    const primaryLineItemId = lineItems[0]?.lineItemId;
+                    const primaryLegacyItemId = lineItems[0]?.legacyItemId;
+                    const shippingCost = primaryLegacyItemId ? (itemsMap[primaryLegacyItemId]?.shipping_cost || 0) : 0;
 
-                    const researcher = itemsMap[lineItems[0].legacyItemId]?.researcher || ""
+                    const researcher =
+                        (primaryLegacyItemId && itemsMap[primaryLegacyItemId]?.researcher) ||
+                        (primaryLineItemId && existingLineItemData[primaryLineItemId]?.researcher) ||
+                        '';
 
                     await upsertOrderLineItems(order, lineItems, researcher);
-                    
+
                     await updateOrderInSupabase(order, buyer.id, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher);
                 } catch (error) {
                     console.log("itemsMap",itemsMap)
@@ -384,7 +490,7 @@ async function getOrdersByUserId (userId) {
         .eq('user_id', userId);
 
     if (error) throw new Error('Failed to fetch orders: ' + error.message);
-    return orders;
+    return (orders || []).map(attachNormalizedLineItemsToOrder);
 };
 
 // ebay上で未発送かつ発送後のmsgを送っていないデータを取得
@@ -403,7 +509,7 @@ async function fetchRelevantOrders(userId) {
         return [];
     }
 
-    return data;
+    return (data || []).map(attachNormalizedLineItemsToOrder);
 }
 
 
@@ -415,33 +521,130 @@ async function updateOrder(orderId, orderData) {
         console.log('Updating order with ID:', orderId); // デバッグ情報を追加
         console.log('Order data to update:', orderData); // デバッグ情報を追加
 
-        const updates = {};
+        const {
+            order_line_items: orderLineItemsPayload,
+            line_items: legacyLineItemsPayload,
+            id: _ignoredId,
+            ...rawUpdates
+        } = orderData || {};
 
-        // 動的に更新フィールドを設定
-        for (const key in orderData) {
-            if (orderData.hasOwnProperty(key)) {
-                updates[key] = orderData[key];
+        const updates = {};
+        Object.keys(rawUpdates || {}).forEach((key) => {
+            if (rawUpdates[key] !== undefined) {
+                updates[key] = rawUpdates[key];
+            }
+        });
+
+        const toNumberOrNull = (value) => {
+            if (value === undefined || value === null || value === '') {
+                return null;
+            }
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : null;
+        };
+
+        if (updates.shipping_cost !== undefined) {
+            updates.shipping_cost = toNumberOrNull(updates.shipping_cost);
+        }
+
+        const lineItemsPayload = Array.isArray(orderLineItemsPayload)
+            ? orderLineItemsPayload
+            : Array.isArray(legacyLineItemsPayload)
+                ? legacyLineItemsPayload
+                : [];
+
+        const lineItemUpdates = lineItemsPayload
+            .map((item) => {
+                const normalized = normalizeOrderLineItem(item);
+                const lineItemId = normalized.id;
+                if (!lineItemId) {
+                    return null;
+                }
+
+                const fields = {};
+                if (normalized.cost_price !== undefined) {
+                    fields.cost_price = toNumberOrNull(normalized.cost_price);
+                }
+                if (normalized.stocking_url !== undefined) {
+                    fields.stocking_url = normalized.stocking_url || null;
+                }
+                if (normalized.researcher !== undefined) {
+                    fields.researcher = normalized.researcher || null;
+                }
+                if (normalized.procurement_status !== undefined) {
+                    fields.procurement_status = normalized.procurement_status || null;
+                }
+                if (normalized.procurement_tracking_number !== undefined) {
+                    fields.procurement_tracking_number = normalized.procurement_tracking_number || null;
+                }
+                if (normalized.procurement_url !== undefined) {
+                    fields.procurement_url = normalized.procurement_url || null;
+                }
+                if (normalized.quantity !== undefined) {
+                    fields.quantity = toNumberOrNull(normalized.quantity);
+                }
+                if (normalized.total_value !== undefined) {
+                    fields.total_value = normalized.total_value === null ? null : toNumberOrNull(normalized.total_value);
+                }
+                if (normalized.total_currency !== undefined) {
+                    fields.total_currency = normalized.total_currency || null;
+                }
+                if (normalized.line_item_cost_value !== undefined) {
+                    fields.line_item_cost_value = normalized.line_item_cost_value === null
+                        ? null
+                        : toNumberOrNull(normalized.line_item_cost_value);
+                }
+                if (normalized.line_item_cost_currency !== undefined) {
+                    fields.line_item_cost_currency = normalized.line_item_cost_currency || null;
+                }
+                if (!Object.keys(fields).length) {
+                    return null;
+                }
+                fields.updated_at = new Date().toISOString();
+                return { id: lineItemId, fields };
+            })
+            .filter(Boolean);
+
+        if (Object.keys(updates).length > 0) {
+            const { error: orderUpdateError } = await supabase
+                .from('orders')
+                .update(updates)
+                .eq('id', orderId);
+
+            if (orderUpdateError) {
+                console.error('Supabase Update Error:', orderUpdateError); // エラー詳細をログに記録
+                throw new Error('Failed to update order: ' + orderUpdateError.message);
             }
         }
 
-        const { data, error } = await supabase
+        if (lineItemUpdates.length > 0) {
+            for (const { id, fields } of lineItemUpdates) {
+                const { error: lineItemError } = await supabase
+                    .from('order_line_items')
+                    .update(fields)
+                    .eq('id', id);
+
+                if (lineItemError) {
+                    console.error('Supabase order_line_items update error:', lineItemError);
+                    throw new Error('Failed to update order line items: ' + lineItemError.message);
+                }
+            }
+        }
+
+        const { data: updatedOrder, error: fetchUpdatedError } = await supabase
             .from('orders')
-            .update(updates)
+            .select('*, order_line_items(*)')
             .eq('id', orderId)
-            .select(); // select()を追加して更新後のデータを返すようにする
+            .single();
 
-        if (error) {
-            console.error('Supabase Update Error:', error); // エラー詳細をログに記録
-            throw new Error('Failed to update order: ' + error.message);
+        if (fetchUpdatedError) {
+            console.error('Failed to fetch updated order:', fetchUpdatedError);
+            throw new Error('Failed to fetch updated order: ' + fetchUpdatedError.message);
         }
 
-        if (!data || data.length === 0) {
-            console.error('No data returned after update'); // デバッグ情報を追加
-            return null;
-        }
-
-        console.log('Updated order data:', data[0]); // 成功時のデータをログに記録
-        return data[0]; // 配列からオブジェクトを返す
+        const normalizedOrder = attachNormalizedLineItemsToOrder(updatedOrder);
+        console.log('Updated order data:', normalizedOrder); // 成功時のデータをログに記録
+        return normalizedOrder;
     } catch (err) {
         console.error('Update Order Service Error:', err); // エラー詳細をログに記録
         throw err;
@@ -491,7 +694,8 @@ async function fetchLastWeekOrders(userId) {
     }
 
     // 注文に含まれる全てのitemIdを収集
-    const itemIds = [...new Set(orders.flatMap(order => order.line_items.map(item => item.legacyItemId)))];
+    const normalizedOrders = (orders || []).map(attachNormalizedLineItemsToOrder);
+    const itemIds = [...new Set(normalizedOrders.flatMap(order => order.line_items.map(item => item.legacyItemId)))];
 
     // 必要なitemIdだけを使ってitemsテーブルからデータを取得
     const { data: items, error: itemsError } = await supabase
@@ -511,7 +715,7 @@ async function fetchLastWeekOrders(userId) {
     });
 
     // ordersデータにitemsデータを追加
-    const enrichedOrders = orders.map(order => {
+    const enrichedOrders = normalizedOrders.map(order => {
         const enrichedLineItems = order.line_items.map(item => {
             const itemData = itemsMap[item.legacyItemId] || {};
             return { ...item, ...itemData };
@@ -531,5 +735,8 @@ module.exports = {
   fetchLastWeekOrders,
   updateProcurementStatus,
   updateProcurementTrackingNumber,
-  markOrdersAsShipped
+  markOrdersAsShipped,
+  normalizeOrderLineItem,
+  attachNormalizedLineItemsToOrder,
+  normalizeProcurementStatusValue
 };
