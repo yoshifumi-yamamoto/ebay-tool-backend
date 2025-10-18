@@ -441,9 +441,9 @@ async function saveOrdersAndBuyers(userId) {
                         (primaryLineItemId && existingLineItemData[primaryLineItemId]?.researcher) ||
                         '';
 
-                    await upsertOrderLineItems(order, lineItems, researcher);
-
                     await updateOrderInSupabase(order, buyer.id, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher);
+
+                    await upsertOrderLineItems(order, lineItems, researcher);
                 } catch (error) {
                     console.log("itemsMap",itemsMap)
                     console.log("order.orderId,",order.orderId)
