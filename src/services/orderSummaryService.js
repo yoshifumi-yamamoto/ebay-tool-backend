@@ -2,18 +2,113 @@ const { Parser } = require('json2csv');
 const supabase = require('../supabaseClient');
 const { attachNormalizedLineItemsToOrder } = require('./orderService');
 
-const DOLLAR_TO_YEN_RATE = 150; // ドル円レートを150円に設定
+const DEFAULT_ORDER_CURRENCY = 'USD';
+const INCENTIVE_RATE = 0.1;
 
-// 利益額と利益率を計算する関数を追加
-function calculateProfitAndMargin(order) {
+const EXCHANGE_RATES_TO_JPY = {
+  USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
+  EUR: Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null,
+  GBP: Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null,
+  AUD: Number(process.env.EXCHANGE_RATE_AUD_TO_JPY) || null,
+  JPY: 1,
+};
+
+const toNumber = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return 0;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[^0-9.-]/g, '');
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+};
+
+const sumCostPrice = (lineItems = []) =>
+  lineItems.reduce((sum, item) => sum + toNumber(item?.cost_price), 0);
+
+const getOrderCurrency = (order) => {
+  if (!order) {
+    return DEFAULT_ORDER_CURRENCY;
+  }
+  if (order.currency) {
+    return order.currency;
+  }
+  if (order.order_currency) {
+    return order.order_currency;
+  }
+  const lineItems = order.line_items || order.order_line_items || [];
+  for (const item of lineItems) {
+    const currency =
+      item?.total_currency ||
+      item?.total?.currency ||
+      item?.line_item_cost_currency ||
+      null;
+    if (currency) {
+      return currency;
+    }
+  }
+  return DEFAULT_ORDER_CURRENCY;
+};
+
+const getExchangeRateToJPY = (currency) => {
+  if (!currency) {
+    return null;
+  }
+  const normalized = currency.toUpperCase();
+  const rate = EXCHANGE_RATES_TO_JPY[normalized];
+  return typeof rate === 'number' && Number.isFinite(rate) ? rate : null;
+};
+
+const addAmountByCurrency = (bucket, currency, amount) => {
+  const numericAmount = toNumber(amount);
+  if (!Number.isFinite(numericAmount) || numericAmount === 0) {
+    return;
+  }
+  const key = currency || DEFAULT_ORDER_CURRENCY;
+  bucket[key] = (bucket[key] || 0) + numericAmount;
+};
+
+const calculateOrderFinancials = (order) => {
   const lineItems = order.line_items || [];
-  const totalCostYen = lineItems.reduce((sum, item) => sum + (parseFloat(item.cost_price) || 0), 0) + (parseFloat(order.shipping_cost) || 0);
-  const earningsAfterPLFeeYen = (order.earnings_after_pl_fee * 0.98) * DOLLAR_TO_YEN_RATE; // 手数料を引いて円に換算
-  const profit = earningsAfterPLFeeYen - totalCostYen;
-  const profitMargin = (profit / earningsAfterPLFeeYen) * 100; // 利益率を計算
-  const researcherIncentive = Math.max(profit * 0.1, 0); // 仮のインセンティブ率 10%
-  return { profit, profitMargin, researcherIncentive };
-}
+  const currency = getOrderCurrency(order);
+  const totalAmount = toNumber(order.total_amount);
+  const earnings = toNumber(order.earnings);
+  const earningsAfterFee = toNumber(order.earnings_after_pl_fee);
+  const shippingCostJpy = toNumber(order.shipping_cost);
+  const costPriceJpy = sumCostPrice(lineItems);
+  const exchangeRate = getExchangeRateToJPY(currency);
+  const earningsAfterFeeJpy =
+    exchangeRate !== null ? earningsAfterFee * exchangeRate : null;
+  const profitJpy =
+    earningsAfterFeeJpy !== null
+      ? earningsAfterFeeJpy - shippingCostJpy - costPriceJpy
+      : null;
+  const profitMargin =
+    earningsAfterFeeJpy && earningsAfterFeeJpy !== 0
+      ? (profitJpy / earningsAfterFeeJpy) * 100
+      : null;
+  const researcherIncentive =
+    profitJpy && profitJpy > 0 ? profitJpy * INCENTIVE_RATE : 0;
+
+  return {
+    currency,
+    totalAmount,
+    earnings,
+    earningsAfterFee,
+    shippingCostJpy,
+    costPriceJpy,
+    earningsAfterFeeJpy,
+    profitJpy,
+    profitMargin,
+    researcherIncentive,
+    exchangeRateApplied: exchangeRate !== null,
+  };
+};
 
 exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
   const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, researcher, page = 1, limit = 20 } = filters;
@@ -27,6 +122,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
           id,
           order_no,
           order_date,
+          total_amount,
           earnings,
           earnings_after_pl_fee,
           shipping_cost,
@@ -59,8 +155,18 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
   const normalizedOrders = (data || []).map(attachNormalizedLineItemsToOrder);
 
   const ordersWithProfit = normalizedOrders.map(order => {
-      const { profit, profitMargin, researcherIncentive } = calculateProfitAndMargin(order);
-      return { ...order, profit, profitMargin, researcherIncentive };
+      const financials = calculateOrderFinancials(order);
+      return {
+          ...order,
+          calculated_currency: financials.currency,
+          calculated_profit_jpy: financials.profitJpy,
+          calculated_profit_margin: financials.profitMargin,
+          calculated_cost_price_jpy: financials.costPriceJpy,
+          calculated_shipping_cost_jpy: financials.shippingCostJpy,
+          calculated_earnings_after_fee_jpy: financials.earningsAfterFeeJpy,
+          calculated_exchange_rate_applied: financials.exchangeRateApplied,
+          researcherIncentive: financials.researcherIncentive,
+      };
   });
 
   // 総注文数取得クエリ
@@ -97,7 +203,7 @@ exports.fetchOrderSummary = async (filters) => {
 
   let query = supabase
     .from('orders')
-    .select('earnings_after_pl_fee, subtotal, shipping_cost, researcher, order_line_items(*)')
+    .select('id, total_amount, earnings, earnings_after_pl_fee, subtotal, shipping_cost, researcher, order_line_items(*)')
     .eq('user_id', user_id)
     .neq('status', 'FULLY_REFUNDED')
     .gte('order_date', start_date)
@@ -113,33 +219,78 @@ exports.fetchOrderSummary = async (filters) => {
 
   const normalizedOrders = (data || []).map(attachNormalizedLineItemsToOrder);
 
-  const totalSales = normalizedOrders.reduce((sum, order) => sum + order.earnings_after_pl_fee, 0);
-  const totalProfit = normalizedOrders.reduce((sum, order) => {
-    const { profit } = calculateProfitAndMargin(order);
-    return sum + profit;
-  }, 0);
-  const totalSubtotal = normalizedOrders.reduce((sum, order) => sum + order.subtotal, 0);
-  const totalOrders = normalizedOrders.length;
-  const profitMargin = (totalProfit / (totalSales * 0.98 * DOLLAR_TO_YEN_RATE)) * 100;
+  const summarySeed = {
+    totalOrders: 0,
+    totalSalesByCurrency: {},
+    totalEarningsByCurrency: {},
+    totalEarningsAfterFeeByCurrency: {},
+    subtotalByCurrency: {},
+    totalShippingCostJpy: 0,
+    totalCostPriceJpy: 0,
+    totalProfitJpy: 0,
+    earningsAfterFeeConvertedJpy: 0,
+    profitSupportedCurrencies: new Set(),
+    missingExchangeRates: new Set(),
+    researcherIncentives: {},
+  };
 
-  const researcherIncentives = normalizedOrders.reduce((acc, order) => {
-    const { researcher } = order;
-    if (researcher) {
-      const { profit } = calculateProfitAndMargin(order);
-      const incentive = profit * 0.1;
-      if (!acc[researcher]) acc[researcher] = 0;
-      acc[researcher] += Math.max(incentive, 0);
+  const summary = normalizedOrders.reduce((acc, order) => {
+    const financials = calculateOrderFinancials(order);
+    acc.totalOrders += 1;
+
+    addAmountByCurrency(acc.totalSalesByCurrency, financials.currency, financials.totalAmount);
+    addAmountByCurrency(acc.totalEarningsByCurrency, financials.currency, financials.earnings);
+    addAmountByCurrency(acc.totalEarningsAfterFeeByCurrency, financials.currency, financials.earningsAfterFee);
+    addAmountByCurrency(acc.subtotalByCurrency, financials.currency, order.subtotal);
+
+    acc.totalShippingCostJpy += financials.shippingCostJpy;
+    acc.totalCostPriceJpy += financials.costPriceJpy;
+
+    if (financials.earningsAfterFeeJpy !== null) {
+      acc.earningsAfterFeeConvertedJpy += financials.earningsAfterFeeJpy;
     }
+
+    if (financials.profitJpy !== null) {
+      acc.totalProfitJpy += financials.profitJpy;
+      acc.profitSupportedCurrencies.add(financials.currency);
+    } else {
+      acc.missingExchangeRates.add(financials.currency);
+    }
+
+    if (order.researcher) {
+      if (!acc.researcherIncentives[order.researcher]) {
+        acc.researcherIncentives[order.researcher] = 0;
+      }
+      acc.researcherIncentives[order.researcher] += Math.max(financials.researcherIncentive, 0);
+    }
+
     return acc;
-  }, {});
+  }, summarySeed);
+
+  const profitMargin =
+    summary.earningsAfterFeeConvertedJpy > 0
+      ? (summary.totalProfitJpy / summary.earningsAfterFeeConvertedJpy) * 100
+      : null;
+
+  const totalSalesDefaultCurrency = summary.totalSalesByCurrency[DEFAULT_ORDER_CURRENCY] || 0;
 
   return {
-    total_sales: totalSales,
-    total_orders: totalOrders,
-    total_profit: totalProfit,
+    total_orders: summary.totalOrders,
+    total_sales: totalSalesDefaultCurrency,
+    total_sales_by_currency: summary.totalSalesByCurrency,
+    total_shipping_cost_jpy: summary.totalShippingCostJpy,
+    total_cost_price_jpy: summary.totalCostPriceJpy,
+    total_earnings_by_currency: summary.totalEarningsByCurrency,
+    total_earnings_after_fee_by_currency: summary.totalEarningsAfterFeeByCurrency,
+    total_profit_jpy: summary.totalProfitJpy,
     profit_margin: profitMargin,
-    total_subtotal: totalSubtotal,
-    researcher_incentives: researcherIncentives,
+    subtotal_by_currency: summary.subtotalByCurrency,
+    earnings_after_fee_converted_jpy: summary.earningsAfterFeeConvertedJpy,
+    profit_supported_currencies: Array.from(summary.profitSupportedCurrencies),
+    profit_missing_exchange_rates: Array.from(summary.missingExchangeRates).filter(
+      (currency) => !summary.profitSupportedCurrencies.has(currency)
+    ),
+    researcher_incentives: summary.researcherIncentives,
   };
 };
 
@@ -153,15 +304,35 @@ exports.downloadOrderSummaryCSV = async (filters) => {
 
   // summaryDataをフォーマット
   const summaryRows = [
-    { label: 'Total Sales', value: summaryData.total_sales },
     { label: 'Total Orders', value: summaryData.total_orders },
-    { label: 'Total Profit', value: summaryData.total_profit },
-    { label: 'Profit Margin', value: summaryData.profit_margin },
-    { label: 'Total Subtotal', value: summaryData.total_subtotal },
-    ...Object.entries(summaryData.researcher_incentives).map(([researcher, incentive]) => ({
-      label: `Incentive for ${researcher}`, value: incentive
-    }))
+    { label: 'Total Profit (JPY)', value: summaryData.total_profit_jpy },
+    { label: 'Profit Margin (%)', value: summaryData.profit_margin },
+    { label: 'Converted Earnings After Fee (JPY)', value: summaryData.earnings_after_fee_converted_jpy },
+    { label: 'Total Shipping Cost (JPY)', value: summaryData.total_shipping_cost_jpy },
+    { label: 'Total Cost Price (JPY)', value: summaryData.total_cost_price_jpy },
   ];
+
+  Object.entries(summaryData.total_sales_by_currency || {}).forEach(([currency, amount]) => {
+    summaryRows.push({ label: `Total Sales (${currency})`, value: amount });
+  });
+  Object.entries(summaryData.total_earnings_by_currency || {}).forEach(([currency, amount]) => {
+    summaryRows.push({ label: `Total Earnings (${currency})`, value: amount });
+  });
+  Object.entries(summaryData.total_earnings_after_fee_by_currency || {}).forEach(([currency, amount]) => {
+    summaryRows.push({ label: `Total Earnings After Fee (${currency})`, value: amount });
+  });
+  Object.entries(summaryData.subtotal_by_currency || {}).forEach(([currency, amount]) => {
+    summaryRows.push({ label: `Subtotal (${currency})`, value: amount });
+  });
+  if (summaryData.profit_missing_exchange_rates?.length) {
+    summaryRows.push({
+      label: 'Profit Missing Exchange Rates',
+      value: summaryData.profit_missing_exchange_rates.join(', '),
+    });
+  }
+  Object.entries(summaryData.researcher_incentives || {}).forEach(([researcher, incentive]) => {
+    summaryRows.push({ label: `Incentive for ${researcher}`, value: incentive });
+  });
 
   // expandedOrdersを作成
   const expandedOrders = ordersData.orders.flatMap(order => {
