@@ -4,6 +4,7 @@ const { fetchEbayAccountTokens, refreshEbayToken } = require("./accountService")
 const { fetchItemDetails } = require("./itemService")
 const { upsertBuyer } = require('./buyerService');
 const { logError } = require('./loggingService');
+const { fetchShipmentDetailsByReference } = require('./shipcoService');
 
 async function fetchOrdersFromEbay(refreshToken) {
     try {
@@ -162,6 +163,101 @@ function attachNormalizedLineItemsToOrder(order) {
     };
 }
 
+const ensureArray = (value) => {
+    if (Array.isArray(value)) {
+        return value;
+    }
+    if (value === undefined || value === null) {
+        return [];
+    }
+    return [value];
+};
+
+const extractTrackingFromShippingStep = (shippingStep = {}) => {
+    if (!shippingStep || typeof shippingStep !== 'object') {
+        return null;
+    }
+    const direct =
+        shippingStep.shipmentTrackingNumber ||
+        shippingStep.shipment_tracking_number ||
+        shippingStep.trackingNumber ||
+        shippingStep.tracking_number ||
+        null;
+    if (direct) {
+        const normalized = String(direct).trim();
+        if (normalized) {
+            return normalized;
+        }
+    }
+    const shipments = ensureArray(shippingStep.shipments);
+    for (const shipment of shipments) {
+        if (!shipment || typeof shipment !== 'object') {
+            continue;
+        }
+        const candidate =
+            shipment.shipmentTrackingNumber ||
+            shipment.shipment_tracking_number ||
+            shipment.trackingNumber ||
+            shipment.tracking_number ||
+            null;
+        if (candidate) {
+            const normalized = String(candidate).trim();
+            if (normalized) {
+                return normalized;
+            }
+        }
+    }
+    return null;
+};
+
+function extractShippingTrackingNumber(order = {}) {
+    const fulfillmentInstructions = ensureArray(order.fulfillmentStartInstructions);
+    for (const instruction of fulfillmentInstructions) {
+        const tracking = extractTrackingFromShippingStep(instruction?.shippingStep);
+        if (tracking) {
+            return tracking;
+        }
+    }
+
+    const lineItems = ensureArray(order.lineItems);
+    for (const item of lineItems) {
+        const lineItemInstructions = item?.lineItemFulfillmentInstructions;
+        const instructionArray = ensureArray(lineItemInstructions);
+        for (const instruction of instructionArray) {
+            const shippingStep = instruction?.shippingStep || instruction?.ShippingStep;
+            const tracking = extractTrackingFromShippingStep(shippingStep);
+            if (tracking) {
+                return tracking;
+            }
+            const direct =
+                instruction?.shipmentTrackingNumber ||
+                instruction?.shipment_tracking_number ||
+                instruction?.trackingNumber ||
+                instruction?.tracking_number ||
+                null;
+            if (direct) {
+                const normalized = String(direct).trim();
+                if (normalized) {
+                    return normalized;
+                }
+            }
+        }
+    }
+
+    const topLevelTracking =
+        order.shipmentTrackingNumber ||
+        order.shipment_tracking_number ||
+        order.trackingNumber ||
+        order.tracking_number ||
+        null;
+
+    if (!topLevelTracking) {
+        return null;
+    }
+    const normalizedTop = String(topLevelTracking).trim();
+    return normalizedTop || null;
+}
+
 /**
  * 注文明細をorder_line_itemsテーブルにアップサートする
  * @param {Object} order - eBay注文データ
@@ -313,6 +409,24 @@ async function markOrdersAsShipped(orderIds) {
 async function updateOrderInSupabase(order, buyerId, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher) {
     // 注文収益を計算する
     const earningsAfterPlFee = order.paymentSummary.totalDueSeller.value * 0.979; // 注文収益 - プロモーテッドリスティングス(2.1%)
+    const toNumberOrNull = (value) => {
+        if (value === undefined || value === null || value === '') {
+            return null;
+        }
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    let shippingTrackingNumber = extractShippingTrackingNumber(order);
+    if (shippingTrackingNumber) {
+        console.info(
+            `[orderService] Tracking number obtained from eBay payload for order ${order.orderId}: ${shippingTrackingNumber}`
+        );
+    } else {
+        console.info(
+            `[orderService] Tracking number not found on eBay payload for order ${order.orderId}.`
+        );
+    }
 
     // 既存のデータを取得
     const { data: existingData, error: fetchError } = await supabase
@@ -325,6 +439,84 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         console.error('Supabaseでの注文データの取得エラー:', fetchError.message);
         return null;
     }
+
+    const existingShipcoSyncedAt = existingData?.shipco_synced_at || null;
+
+    const existingShippingCost = toNumberOrNull(existingData?.shipping_cost);
+    const fallbackShippingCost = toNumberOrNull(shippingCost);
+
+    const needsShipcoForTracking =
+        !shippingTrackingNumber && !existingData?.shipping_tracking_number;
+    const shippingCostEqualsFallback =
+        fallbackShippingCost !== null &&
+        existingShippingCost !== null &&
+        Math.abs(existingShippingCost - fallbackShippingCost) < 0.01;
+    const needsShipcoForShippingCost =
+        existingShippingCost === null ||
+        existingShippingCost === 0 ||
+        shippingCostEqualsFallback;
+
+    let shipcoDetails = null;
+    if (!existingShipcoSyncedAt && (needsShipcoForTracking || needsShipcoForShippingCost)) {
+        console.info(
+            `[orderService] Attempting Ship&Co lookup for order ${order.orderId}. (trackingNeeded=${needsShipcoForTracking}, shippingCostNeeded=${needsShipcoForShippingCost})`
+        );
+        try {
+            shipcoDetails = await fetchShipmentDetailsByReference(order.orderId);
+        } catch (error) {
+            logError('orderService.updateOrderInSupabase.fetchShipmentDetailsByReference', error);
+            console.error(
+                `[orderService] Ship&Co lookup failed for order ${order.orderId}:`,
+                error?.message || error
+            );
+        }
+    }
+
+    let shipcoDataApplied = false;
+
+    if (!shippingTrackingNumber && shipcoDetails?.trackingNumber) {
+        shippingTrackingNumber = shipcoDetails.trackingNumber;
+        console.info(
+            `[orderService] Ship&Co tracking lookup succeeded for order ${order.orderId}: ${shippingTrackingNumber}`
+        );
+        shipcoDataApplied = true;
+    } else if (!shippingTrackingNumber && existingData?.shipping_tracking_number) {
+        shippingTrackingNumber = existingData.shipping_tracking_number;
+        console.info(
+            `[orderService] Using existing shipping tracking number from database for order ${order.orderId}: ${shippingTrackingNumber}`
+        );
+    } else if (!shippingTrackingNumber) {
+        console.warn(
+            `[orderService] Ship&Co tracking lookup returned no result for order ${order.orderId}`
+        );
+    }
+
+    let resolvedShippingCost = existingShippingCost;
+
+    const shipcoRate = toNumberOrNull(shipcoDetails?.deliveryRate);
+    const shipcoCurrency = shipcoDetails?.deliveryCurrency || null;
+    const isShipcoJpy = shipcoCurrency === null || shipcoCurrency.toUpperCase() === 'JPY';
+
+    if (shipcoRate !== null && isShipcoJpy) {
+        resolvedShippingCost = shipcoRate;
+        console.info(
+            `[orderService] Ship&Co delivery rate applied for order ${order.orderId}: ${shipcoRate} JPY`
+        );
+        shipcoDataApplied = true;
+    } else if (shipcoRate !== null && !isShipcoJpy) {
+        console.warn(
+            `[orderService] Ship&Co delivery rate currency ${shipcoCurrency} is not JPY for order ${order.orderId}. Shipping cost not updated.`
+        );
+    }
+
+    if (resolvedShippingCost === null && fallbackShippingCost !== null) {
+        resolvedShippingCost = fallbackShippingCost;
+    }
+
+    const shipcoSyncedAt =
+        shipcoDataApplied
+            ? new Date().toISOString()
+            : existingShipcoSyncedAt || null;
 
     // マージするデータを作成
     const dataToUpsert = {
@@ -343,7 +535,10 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         subtotal: order.pricingSummary.priceSubtotal.value,
         earnings: order.paymentSummary.totalDueSeller.value, // 注文収益
         earnings_after_pl_fee: earningsAfterPlFee,
-        shipping_cost: existingData ? existingData.shipping_cost : shippingCost, // 更新しない
+        shipping_cost: resolvedShippingCost,
+        shipping_tracking_number:
+            shippingTrackingNumber || (existingData ? existingData.shipping_tracking_number : null),
+        shipco_synced_at: shipcoSyncedAt,
         researcher: existingData ? existingData.researcher : researcher
     };
 
