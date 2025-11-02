@@ -6,6 +6,125 @@ const { upsertBuyer } = require('./buyerService');
 const { logError } = require('./loggingService');
 const { fetchShipmentDetailsByReference } = require('./shipcoService');
 
+const DEFAULT_PAYOUT_CURRENCY = 'USD';
+const INCENTIVE_RATE = 0.1;
+
+const ENV_EXCHANGE_RATES = {
+    USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 145,
+    EUR: Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null,
+    CAD: Number(process.env.EXCHANGE_RATE_CAD_TO_JPY) || null,
+    GBP: Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null,
+    AUD: Number(process.env.EXCHANGE_RATE_AUD_TO_JPY) || null,
+    JPY: 1,
+};
+
+const normalizeCurrencyCode = (value) => {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const trimmed = value.trim();
+    return trimmed ? trimmed.toUpperCase() : null;
+};
+
+const toNumber = (value) => {
+    if (value === undefined || value === null || value === '') {
+        return 0;
+    }
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const sumCostPriceJpy = (lineItems = []) =>
+    lineItems.reduce((total, item) => total + toNumber(item?.cost_price), 0);
+
+const loadUserExchangeRates = async (userId) => {
+    const rates = { ...ENV_EXCHANGE_RATES };
+    rates.JPY = 1;
+    const targetUserId = userId || 2;
+    try {
+        const { data, error } = await supabase
+            .from('users')
+            .select('usd_rate, eur_rate, cad_rate, gbp_rate, aud_rate')
+            .eq('id', targetUserId)
+            .single();
+
+        if (error) {
+            console.error('Failed to load user exchange rates:', error.message);
+            return rates;
+        }
+
+        if (!data) {
+            return rates;
+        }
+
+        const mapping = {
+            usd_rate: 'USD',
+            eur_rate: 'EUR',
+            cad_rate: 'CAD',
+            gbp_rate: 'GBP',
+            aud_rate: 'AUD',
+        };
+
+        Object.entries(mapping).forEach(([column, currency]) => {
+            const value = data[column];
+            if (value === undefined || value === null) {
+                return;
+            }
+            const numeric = Number(value);
+            if (Number.isFinite(numeric)) {
+                rates[currency] = numeric;
+            }
+        });
+    } catch (err) {
+        console.error('Unexpected error while loading exchange rates:', err);
+    }
+    return rates;
+};
+
+const calculateOrderFinancials = (order, exchangeRates) => {
+    const earningsAfterFee = toNumber(order.earnings_after_pl_fee || order.earnings);
+    const earningsCurrency = normalizeCurrencyCode(order.earnings_after_pl_fee_currency) ||
+        normalizeCurrencyCode(order.earnings_currency) ||
+        DEFAULT_PAYOUT_CURRENCY;
+    const rate = exchangeRates[earningsCurrency];
+    const earningsAfterFeeJpy = rate ? earningsAfterFee * rate : null;
+    const shippingCostJpy = toNumber(order.shipping_cost);
+    const costPriceJpy = sumCostPriceJpy(order.line_items || []);
+    const profitJpy = earningsAfterFeeJpy !== null
+        ? earningsAfterFeeJpy - shippingCostJpy - costPriceJpy
+        : null;
+    const profitMargin = earningsAfterFeeJpy && earningsAfterFeeJpy !== 0
+        ? (profitJpy / earningsAfterFeeJpy) * 100
+        : null;
+    const researcherIncentive = profitJpy && profitJpy > 0 ? profitJpy * INCENTIVE_RATE : 0;
+
+    return {
+        earningsAfterFeeJpy,
+        shippingCostJpy,
+        costPriceJpy,
+        profitJpy,
+        profitMargin,
+        rateApplied: rate !== undefined && rate !== null,
+        earningsCurrency,
+        researcherIncentive,
+    };
+};
+
+const attachFinancialsToOrder = (order, exchangeRates) => {
+    const financials = calculateOrderFinancials(order, exchangeRates);
+    return {
+        ...order,
+        calculated_earnings_after_fee_jpy: financials.earningsAfterFeeJpy,
+        calculated_profit_jpy: financials.profitJpy,
+        calculated_profit_margin: financials.profitMargin,
+        calculated_cost_price_jpy: financials.costPriceJpy,
+        calculated_shipping_cost_jpy: financials.shippingCostJpy,
+        calculated_exchange_rate_applied: financials.rateApplied,
+        calculated_exchange_rate_currency: financials.earningsCurrency,
+        researcherIncentive: financials.researcherIncentive,
+    };
+};
+
 async function fetchOrdersFromEbay(refreshToken) {
     try {
         const response = await axios({
@@ -440,6 +559,48 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         return null;
     }
 
+    const normalizeCurrencyCode = (value) => {
+        if (typeof value !== 'string') {
+            return null;
+        }
+        const trimmed = value.trim();
+        return trimmed ? trimmed.toUpperCase() : null;
+    };
+
+    const extractCurrencyFromNode = (node) => {
+        if (!node || typeof node !== 'object') {
+            return null;
+        }
+        const candidate =
+            node.currency ||
+            node.currency_code ||
+            node.currencyCode ||
+            node.currency_iso ||
+            node.currencyIso ||
+            null;
+        return normalizeCurrencyCode(candidate);
+    };
+
+    const resolveCurrency = (incoming, existing) =>
+        normalizeCurrencyCode(incoming) || normalizeCurrencyCode(existing) || null;
+
+    const totalAmountCurrency = resolveCurrency(
+        extractCurrencyFromNode(order.totalFeeBasisAmount),
+        existingData?.total_amount_currency
+    );
+    const subtotalCurrency = resolveCurrency(
+        extractCurrencyFromNode(order.pricingSummary?.priceSubtotal),
+        existingData?.subtotal_currency
+    );
+    const earningsCurrency = resolveCurrency(
+        extractCurrencyFromNode(order.paymentSummary?.totalDueSeller),
+        existingData?.earnings_currency
+    );
+    const earningsAfterPlFeeCurrency = resolveCurrency(
+        extractCurrencyFromNode(order.paymentSummary?.totalDueSeller),
+        existingData?.earnings_after_pl_fee_currency || earningsCurrency
+    );
+
     const existingShipcoSyncedAt = existingData?.shipco_synced_at || null;
 
     const existingShippingCost = toNumberOrNull(existingData?.shipping_cost);
@@ -518,6 +679,10 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
             ? new Date().toISOString()
             : existingShipcoSyncedAt || null;
 
+    console.info(
+        `[orderService] Order ${order.orderId} earnings summary: earnings=${order.paymentSummary.totalDueSeller.value} ${earningsCurrency || 'USD'}, earnings_after_pl_fee=${earningsAfterPlFee} ${earningsAfterPlFeeCurrency || earningsCurrency || 'USD'}`
+    );
+
     // マージするデータを作成
     const dataToUpsert = {
         order_no: order.orderId,
@@ -538,6 +703,10 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         shipping_cost: resolvedShippingCost,
         shipping_tracking_number:
             shippingTrackingNumber || (existingData ? existingData.shipping_tracking_number : null),
+        total_amount_currency: totalAmountCurrency,
+        subtotal_currency: subtotalCurrency,
+        earnings_currency: earningsCurrency,
+        earnings_after_pl_fee_currency: earningsAfterPlFeeCurrency,
         shipco_synced_at: shipcoSyncedAt,
         researcher: existingData ? existingData.researcher : researcher
     };
@@ -562,7 +731,7 @@ async function saveOrdersAndBuyers(userId) {
         try {
             const accessToken = await refreshEbayToken(token);
             const orders = await fetchOrdersFromEbay(accessToken);
-            
+
             const legacyItemIds = orders.flatMap(order => order.lineItems.map(item => item.legacyItemId));
 
             const { data: existingOrders, error: existingOrdersError } = await supabase
@@ -613,7 +782,7 @@ async function saveOrdersAndBuyers(userId) {
             itemsData.forEach(item => {
                 itemsMap[item.ebay_item_id] = item;
             });
-            
+
 
             for (let order of orders) {
                 try {
@@ -640,8 +809,8 @@ async function saveOrdersAndBuyers(userId) {
 
                     await upsertOrderLineItems(order, lineItems, researcher);
                 } catch (error) {
-                    console.log("itemsMap",itemsMap)
-                    console.log("order.orderId,",order.orderId)
+                    console.log("itemsMap", itemsMap)
+                    console.log("order.orderId,", order.orderId)
                     console.error('注文処理エラー:', error);
                     // itemIdを利用できる場合はログに追加
                     const itemId = error?.item?.ItemID?.[0] || 'N/A';
@@ -655,12 +824,12 @@ async function saveOrdersAndBuyers(userId) {
                             functionName: 'saveOrdersAndBuyers',
                         }
                     });
-                    
+
                 }
             }
         } catch (error) {
             console.error('注文の取得または処理の失敗:', error);
-                // itemIdを利用できる場合はログに追加
+            // itemIdを利用できる場合はログに追加
             const itemId = error?.item?.ItemID?.[0] || 'N/A';
 
             await logError({
@@ -677,15 +846,18 @@ async function saveOrdersAndBuyers(userId) {
 }
 
 
-  
-async function getOrdersByUserId (userId) {
+
+async function getOrdersByUserId(userId) {
     let { data: orders, error } = await supabase
         .from('orders')
         .select('*, order_line_items(*)')
         .eq('user_id', userId);
 
     if (error) throw new Error('Failed to fetch orders: ' + error.message);
-    return (orders || []).map(attachNormalizedLineItemsToOrder);
+    const exchangeRates = await loadUserExchangeRates(userId);
+    return (orders || [])
+        .map(attachNormalizedLineItemsToOrder)
+        .map((order) => attachFinancialsToOrder(order, exchangeRates));
 };
 
 // ebay上で未発送かつ発送後のmsgを送っていないデータを取得
@@ -704,7 +876,10 @@ async function fetchRelevantOrders(userId) {
         return [];
     }
 
-    return (data || []).map(attachNormalizedLineItemsToOrder);
+    const exchangeRates = await loadUserExchangeRates(userId);
+    return (data || [])
+        .map(attachNormalizedLineItemsToOrder)
+        .map((order) => attachFinancialsToOrder(order, exchangeRates));
 }
 
 
@@ -838,8 +1013,10 @@ async function updateOrder(orderId, orderData) {
         }
 
         const normalizedOrder = attachNormalizedLineItemsToOrder(updatedOrder);
-        console.log('Updated order data:', normalizedOrder); // 成功時のデータをログに記録
-        return normalizedOrder;
+        const exchangeRates = await loadUserExchangeRates(updatedOrder?.user_id);
+        const enrichedOrder = attachFinancialsToOrder(normalizedOrder, exchangeRates);
+        console.log('Updated order data:', enrichedOrder); // 成功時のデータをログに記録
+        return enrichedOrder;
     } catch (err) {
         console.error('Update Order Service Error:', err); // エラー詳細をログに記録
         throw err;
@@ -890,6 +1067,7 @@ async function fetchLastWeekOrders(userId) {
 
     // 注文に含まれる全てのitemIdを収集
     const normalizedOrders = (orders || []).map(attachNormalizedLineItemsToOrder);
+    const exchangeRates = await loadUserExchangeRates(userId);
     const itemIds = [...new Set(normalizedOrders.flatMap(order => order.line_items.map(item => item.legacyItemId)))];
 
     // 必要なitemIdだけを使ってitemsテーブルからデータを取得
@@ -915,23 +1093,24 @@ async function fetchLastWeekOrders(userId) {
             const itemData = itemsMap[item.legacyItemId] || {};
             return { ...item, ...itemData };
         });
-        return { ...order, line_items: enrichedLineItems };
+        const orderWithItems = { ...order, line_items: enrichedLineItems };
+        return attachFinancialsToOrder(orderWithItems, exchangeRates);
     });
 
     return enrichedOrders;
 }
 
 module.exports = {
-  fetchOrdersFromEbay,
-  saveOrdersAndBuyers,
-  getOrdersByUserId,
-  fetchRelevantOrders,
-  updateOrder,
-  fetchLastWeekOrders,
-  updateProcurementStatus,
-  updateProcurementTrackingNumber,
-  markOrdersAsShipped,
-  normalizeOrderLineItem,
-  attachNormalizedLineItemsToOrder,
-  normalizeProcurementStatusValue
+    fetchOrdersFromEbay,
+    saveOrdersAndBuyers,
+    getOrdersByUserId,
+    fetchRelevantOrders,
+    updateOrder,
+    fetchLastWeekOrders,
+    updateProcurementStatus,
+    updateProcurementTrackingNumber,
+    markOrdersAsShipped,
+    normalizeOrderLineItem,
+    attachNormalizedLineItemsToOrder,
+    normalizeProcurementStatusValue
 };

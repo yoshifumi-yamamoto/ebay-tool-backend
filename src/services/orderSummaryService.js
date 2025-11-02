@@ -3,14 +3,24 @@ const supabase = require('../supabaseClient');
 const { attachNormalizedLineItemsToOrder } = require('./orderService');
 
 const DEFAULT_ORDER_CURRENCY = 'USD';
+const DEFAULT_PAYOUT_CURRENCY = 'USD';
 const INCENTIVE_RATE = 0.1;
 
-const EXCHANGE_RATES_TO_JPY = {
+const ENV_EXCHANGE_RATES = {
   USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
   EUR: Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null,
+  CAD: Number(process.env.EXCHANGE_RATE_CAD_TO_JPY) || null,
   GBP: Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null,
   AUD: Number(process.env.EXCHANGE_RATE_AUD_TO_JPY) || null,
   JPY: 1,
+};
+
+const normalizeCurrencyCode = (value) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed.toUpperCase() : null;
 };
 
 const toNumber = (value) => {
@@ -55,12 +65,12 @@ const getOrderCurrency = (order) => {
   return DEFAULT_ORDER_CURRENCY;
 };
 
-const getExchangeRateToJPY = (currency) => {
+const getExchangeRateToJPY = (currency, exchangeRates) => {
   if (!currency) {
     return null;
   }
-  const normalized = currency.toUpperCase();
-  const rate = EXCHANGE_RATES_TO_JPY[normalized];
+  const normalized = normalizeCurrencyCode(currency);
+  const rate = exchangeRates[normalized];
   return typeof rate === 'number' && Number.isFinite(rate) ? rate : null;
 };
 
@@ -69,19 +79,35 @@ const addAmountByCurrency = (bucket, currency, amount) => {
   if (!Number.isFinite(numericAmount) || numericAmount === 0) {
     return;
   }
-  const key = currency || DEFAULT_ORDER_CURRENCY;
+  const key = normalizeCurrencyCode(currency) || DEFAULT_ORDER_CURRENCY;
   bucket[key] = (bucket[key] || 0) + numericAmount;
 };
 
-const calculateOrderFinancials = (order) => {
+const calculateOrderFinancials = (order, exchangeRates) => {
   const lineItems = order.line_items || [];
-  const currency = getOrderCurrency(order);
+  const fallbackCurrency = getOrderCurrency(order);
+
   const totalAmount = toNumber(order.total_amount);
+  const totalAmountCurrency =
+    normalizeCurrencyCode(order.total_amount_currency) ||
+    normalizeCurrencyCode(fallbackCurrency) ||
+    DEFAULT_ORDER_CURRENCY;
+
+  const subtotal = toNumber(order.subtotal);
+  const subtotalCurrency =
+    normalizeCurrencyCode(order.subtotal_currency) || totalAmountCurrency;
+
   const earnings = toNumber(order.earnings);
+  const earningsCurrency =
+    normalizeCurrencyCode(order.earnings_currency) || DEFAULT_PAYOUT_CURRENCY;
+
   const earningsAfterFee = toNumber(order.earnings_after_pl_fee);
+  const earningsAfterFeeCurrency =
+    normalizeCurrencyCode(order.earnings_after_pl_fee_currency) || earningsCurrency;
+
   const shippingCostJpy = toNumber(order.shipping_cost);
   const costPriceJpy = sumCostPrice(lineItems);
-  const exchangeRate = getExchangeRateToJPY(currency);
+  const exchangeRate = getExchangeRateToJPY(earningsAfterFeeCurrency, exchangeRates);
   const earningsAfterFeeJpy =
     exchangeRate !== null ? earningsAfterFee * exchangeRate : null;
   const profitJpy =
@@ -96,10 +122,14 @@ const calculateOrderFinancials = (order) => {
     profitJpy && profitJpy > 0 ? profitJpy * INCENTIVE_RATE : 0;
 
   return {
-    currency,
     totalAmount,
+    totalAmountCurrency,
+    subtotal,
+    subtotalCurrency,
     earnings,
+    earningsCurrency,
     earningsAfterFee,
+    earningsAfterFeeCurrency,
     shippingCostJpy,
     costPriceJpy,
     earningsAfterFeeJpy,
@@ -107,13 +137,66 @@ const calculateOrderFinancials = (order) => {
     profitMargin,
     researcherIncentive,
     exchangeRateApplied: exchangeRate !== null,
+    exchangeRateCurrency: earningsAfterFeeCurrency,
   };
+};
+
+const loadExchangeRatesForUser = async (userId) => {
+  const normalizedRates = { ...ENV_EXCHANGE_RATES };
+  normalizedRates.JPY = 1;
+
+  if (!userId) {
+    return normalizedRates;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('usd_rate, eur_rate, cad_rate, gbp_rate, aud_rate')
+      .eq('id', userId)
+      .single();
+
+    if (error) {
+      console.error('Failed to load user exchange rates:', error.message);
+      return normalizedRates;
+    }
+
+    if (!data) {
+      return normalizedRates;
+    }
+
+    const mapping = {
+      usd_rate: 'USD',
+      eur_rate: 'EUR',
+      cad_rate: 'CAD',
+      gbp_rate: 'GBP',
+      aud_rate: 'AUD',
+    };
+
+    Object.entries(mapping).forEach(([column, currency]) => {
+      const value = data[column];
+      if (value === undefined || value === null) {
+        return;
+      }
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        normalizedRates[currency] = numeric;
+      }
+    });
+
+    return normalizedRates;
+  } catch (err) {
+    console.error('Unexpected error while loading exchange rates:', err);
+    return normalizedRates;
+  }
 };
 
 exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
   const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, researcher, page = 1, limit = 20 } = filters;
 
   const offset = (page - 1) * limit;
+
+  const exchangeRates = await loadExchangeRatesForUser(user_id);
 
   // データ取得クエリ
   let query = supabase
@@ -123,10 +206,14 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
           order_no,
           order_date,
           total_amount,
+          total_amount_currency,
           earnings,
+          earnings_currency,
           earnings_after_pl_fee,
+          earnings_after_pl_fee_currency,
           shipping_cost,
           subtotal,
+          subtotal_currency,
           status,
           buyer_country_code,
           researcher,
@@ -155,16 +242,21 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
   const normalizedOrders = (data || []).map(attachNormalizedLineItemsToOrder);
 
   const ordersWithProfit = normalizedOrders.map(order => {
-      const financials = calculateOrderFinancials(order);
+      const financials = calculateOrderFinancials(order, exchangeRates);
       return {
           ...order,
-          calculated_currency: financials.currency,
+          calculated_currency: financials.totalAmountCurrency,
+          calculated_total_amount_currency: financials.totalAmountCurrency,
+          calculated_subtotal_currency: financials.subtotalCurrency,
+          calculated_earnings_currency: financials.earningsCurrency,
+          calculated_earnings_after_fee_currency: financials.earningsAfterFeeCurrency,
           calculated_profit_jpy: financials.profitJpy,
           calculated_profit_margin: financials.profitMargin,
           calculated_cost_price_jpy: financials.costPriceJpy,
           calculated_shipping_cost_jpy: financials.shippingCostJpy,
           calculated_earnings_after_fee_jpy: financials.earningsAfterFeeJpy,
           calculated_exchange_rate_applied: financials.exchangeRateApplied,
+          calculated_exchange_rate_currency: financials.exchangeRateCurrency,
           researcherIncentive: financials.researcherIncentive,
       };
   });
@@ -203,7 +295,7 @@ exports.fetchOrderSummary = async (filters) => {
 
   let query = supabase
     .from('orders')
-    .select('id, total_amount, earnings, earnings_after_pl_fee, subtotal, shipping_cost, researcher, order_line_items(*)')
+    .select('id, total_amount, total_amount_currency, earnings, earnings_currency, earnings_after_pl_fee, earnings_after_pl_fee_currency, subtotal, subtotal_currency, shipping_cost, researcher, order_line_items(*)')
     .eq('user_id', user_id)
     .neq('status', 'FULLY_REFUNDED')
     .gte('order_date', start_date)
@@ -218,6 +310,8 @@ exports.fetchOrderSummary = async (filters) => {
   if (error) throw error;
 
   const normalizedOrders = (data || []).map(attachNormalizedLineItemsToOrder);
+
+  const exchangeRates = await loadExchangeRatesForUser(user_id);
 
   const summarySeed = {
     totalOrders: 0,
@@ -235,13 +329,13 @@ exports.fetchOrderSummary = async (filters) => {
   };
 
   const summary = normalizedOrders.reduce((acc, order) => {
-    const financials = calculateOrderFinancials(order);
+    const financials = calculateOrderFinancials(order, exchangeRates);
     acc.totalOrders += 1;
 
-    addAmountByCurrency(acc.totalSalesByCurrency, financials.currency, financials.totalAmount);
-    addAmountByCurrency(acc.totalEarningsByCurrency, financials.currency, financials.earnings);
-    addAmountByCurrency(acc.totalEarningsAfterFeeByCurrency, financials.currency, financials.earningsAfterFee);
-    addAmountByCurrency(acc.subtotalByCurrency, financials.currency, order.subtotal);
+    addAmountByCurrency(acc.totalSalesByCurrency, financials.totalAmountCurrency, financials.totalAmount);
+    addAmountByCurrency(acc.totalEarningsByCurrency, financials.earningsCurrency, financials.earnings);
+    addAmountByCurrency(acc.totalEarningsAfterFeeByCurrency, financials.earningsAfterFeeCurrency, financials.earningsAfterFee);
+    addAmountByCurrency(acc.subtotalByCurrency, financials.subtotalCurrency, financials.subtotal);
 
     acc.totalShippingCostJpy += financials.shippingCostJpy;
     acc.totalCostPriceJpy += financials.costPriceJpy;
@@ -252,9 +346,9 @@ exports.fetchOrderSummary = async (filters) => {
 
     if (financials.profitJpy !== null) {
       acc.totalProfitJpy += financials.profitJpy;
-      acc.profitSupportedCurrencies.add(financials.currency);
+      acc.profitSupportedCurrencies.add(financials.earningsAfterFeeCurrency);
     } else {
-      acc.missingExchangeRates.add(financials.currency);
+      acc.missingExchangeRates.add(financials.earningsAfterFeeCurrency);
     }
 
     if (order.researcher) {
@@ -288,7 +382,7 @@ exports.fetchOrderSummary = async (filters) => {
     earnings_after_fee_converted_jpy: summary.earningsAfterFeeConvertedJpy,
     profit_supported_currencies: Array.from(summary.profitSupportedCurrencies),
     profit_missing_exchange_rates: Array.from(summary.missingExchangeRates).filter(
-      (currency) => !summary.profitSupportedCurrencies.has(currency)
+      (currency) => currency && !summary.profitSupportedCurrencies.has(currency)
     ),
     researcher_incentives: summary.researcherIncentives,
   };
