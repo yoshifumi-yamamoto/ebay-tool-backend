@@ -61,14 +61,14 @@ exports.deleteAccount = async (id) => {
 exports.fetchEbayAccountTokens = async (userId) => {
     const { data, error } = await supabase
         .from('accounts')
-        .select('refresh_token')
+        .select('id, refresh_token, ebay_user_id')
         .eq('user_id', userId);
 
     if (error) {
         console.error('Failed to fetch eBay account tokens:', error.message);
         throw error;
     }
-    return data.map(account => account.refresh_token);
+    return data;
 }
 
 exports.refreshEbayToken = async (refreshToken) => {

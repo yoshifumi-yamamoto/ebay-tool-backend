@@ -149,14 +149,19 @@ async function fetchOrdersFromEbay(refreshToken) {
  * @returns {Object} - バイヤー情報
  */
 async function fetchAndUpsertBuyer(order, userId) {
+    const buyerInfo = order?.buyer || {};
+    const registrationAddress = buyerInfo?.buyerRegistrationAddress || {};
+    const contactAddress = registrationAddress?.contactAddress || null;
+    const primaryPhone = registrationAddress?.primaryPhone || {};
+
     return await upsertBuyer({
-        ebay_buyer_id: order.buyer.username,
-        name: order.buyer.buyerRegistrationAddress.fullName,
+        ebay_buyer_id: buyerInfo?.username || null,
+        name: registrationAddress?.fullName || null,
         user_id: userId,
-        ebay_user_id: order.sellerId,
-        address: order.buyer.buyerRegistrationAddress.contactAddress,
-        phone_number: order.buyer.buyerRegistrationAddress.primaryPhone.phoneNumber,
-        last_purchase_date: order.creationDate,
+        ebay_user_id: order?.sellerId || null,
+        address: contactAddress,
+        phone_number: primaryPhone?.phoneNumber || null,
+        last_purchase_date: order?.creationDate || new Date().toISOString(),
         registered_date: new Date().toISOString()
     });
 }
@@ -211,6 +216,8 @@ const PROCUREMENT_STATUS_ALIASES = {
     '欠品': 'OUTOFSTOCK'
 };
 
+const PROCUREMENT_ORDER_STATUSES = new Set(['ORDERED', 'OUTOFSTOCK']);
+
 function normalizeProcurementStatusValue(status) {
     if (status === undefined || status === null) {
         return null;
@@ -227,6 +234,12 @@ function normalizeProcurementStatusValue(status) {
         return PROCUREMENT_STATUS_ALIASES[raw];
     }
     return upper;
+}
+function shouldTrackProcurementOrderedAt(status) {
+    if (!status) {
+        return false;
+    }
+    return PROCUREMENT_ORDER_STATUSES.has(status);
 }
 
 function normalizeOrderLineItem(item = {}) {
@@ -391,7 +404,7 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
     const lineItemIds = lineItems.map((item) => item.lineItemId);
     const { data: existingLineItems, error: fetchError } = await supabase
         .from('order_line_items')
-        .select('id, procurement_tracking_number, procurement_url, procurement_status, cost_price, researcher, item_image, stocking_url, total_value, total_currency, line_item_cost_value, line_item_cost_currency, quantity')
+        .select('id, procurement_tracking_number, procurement_url, procurement_status, procurement_ordered_at, cost_price, researcher, item_image, stocking_url, total_value, total_currency, line_item_cost_value, line_item_cost_currency, quantity')
         .in('id', lineItemIds);
 
     if (fetchError && fetchError.code !== 'PGRST116') {
@@ -416,6 +429,12 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
         const existingStatus = normalizeProcurementStatusValue(existing.procurement_status);
         const incomingStatus = normalizeProcurementStatusValue(item.procurement_status ?? item.procurementStatus ?? item.stocking_status ?? item.stockingStatus ?? null);
         const procurementStatus = incomingStatus ?? existingStatus ?? 'NEW';
+        let procurementOrderedAt = existing.procurement_ordered_at || null;
+        if (shouldTrackProcurementOrderedAt(procurementStatus)) {
+            procurementOrderedAt = procurementOrderedAt || new Date().toISOString();
+        } else if (procurementStatus === 'NEW') {
+            procurementOrderedAt = null;
+        }
         return {
             id: item.lineItemId,
             order_no: order.orderId,
@@ -434,6 +453,7 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
             procurement_tracking_number: existing.procurement_tracking_number || null,
             procurement_url: existing.procurement_url || item.stocking_url || null,
             procurement_status: procurementStatus,
+            procurement_ordered_at: procurementOrderedAt,
             updated_at: new Date().toISOString()
         };
     });
@@ -453,11 +473,32 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
  * @param {string} status - 更新後の仕入ステータス
  */
 async function updateProcurementStatus(lineItemId, status) {
+    const normalizedStatus = normalizeProcurementStatusValue(status);
+    const nowIso = new Date().toISOString();
+
+    const { data: existingItem, error: fetchError } = await supabase
+        .from('order_line_items')
+        .select('procurement_ordered_at')
+        .eq('id', lineItemId)
+        .single();
+
+    if (fetchError && fetchError.code !== 'PGRST116') {
+        throw new Error('Failed to fetch order line item: ' + fetchError.message);
+    }
+
+    let procurementOrderedAt = existingItem?.procurement_ordered_at || null;
+    if (shouldTrackProcurementOrderedAt(normalizedStatus)) {
+        procurementOrderedAt = procurementOrderedAt || nowIso;
+    } else if (normalizedStatus === 'NEW') {
+        procurementOrderedAt = null;
+    }
+
     const { data, error } = await supabase
         .from('order_line_items')
         .update({
-            procurement_status: status,
-            updated_at: new Date().toISOString()
+            procurement_status: normalizedStatus,
+            procurement_ordered_at: procurementOrderedAt,
+            updated_at: nowIso
         })
         .eq('id', lineItemId)
         .select();
@@ -602,6 +643,13 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     );
 
     const existingShipcoSyncedAt = existingData?.shipco_synced_at || null;
+    const shippingStatusRaw = existingData?.shipping_status || null;
+    const normalizedShippingStatus =
+        typeof shippingStatusRaw === 'string'
+            ? shippingStatusRaw.trim().toUpperCase()
+            : null;
+    const shouldSkipShipcoIntegration =
+        normalizedShippingStatus === 'UNSHIPPED' || shippingStatusRaw === '未';
 
     const existingShippingCost = toNumberOrNull(existingData?.shipping_cost);
     const fallbackShippingCost = toNumberOrNull(shippingCost);
@@ -618,7 +666,11 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         shippingCostEqualsFallback;
 
     let shipcoDetails = null;
-    if (!existingShipcoSyncedAt && (needsShipcoForTracking || needsShipcoForShippingCost)) {
+    if (shouldSkipShipcoIntegration) {
+        console.info(
+            `[orderService] Ship&Co lookup skipped for order ${order.orderId} because shipping_status is ${shippingStatusRaw || 'unset'}`
+        );
+    } else if (!existingShipcoSyncedAt && (needsShipcoForTracking || needsShipcoForShippingCost)) {
         console.info(
             `[orderService] Attempting Ship&Co lookup for order ${order.orderId}. (trackingNeeded=${needsShipcoForTracking}, shippingCostNeeded=${needsShipcoForShippingCost})`
         );
@@ -726,10 +778,41 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
 
 // すべての注文とバイヤー情報をSupabaseに保存する関数
 async function saveOrdersAndBuyers(userId) {
-    const tokens = await fetchEbayAccountTokens(userId);
-    for (let token of tokens) {
+    const accounts = await fetchEbayAccountTokens(userId);
+    for (const account of accounts) {
+        const refreshToken = account?.refresh_token;
+        const ebayUserId = account?.ebay_user_id || null;
+        const accountId = account?.id || null;
+        const accountLabel = ebayUserId || (accountId ? `account_id=${accountId}` : 'unknown account');
+
+        let accessToken;
         try {
-            const accessToken = await refreshEbayToken(token);
+            accessToken = await refreshEbayToken(refreshToken);
+        } catch (tokenError) {
+            const errorMessage =
+                tokenError?.response?.data?.error_description ||
+                tokenError?.response?.data?.error ||
+                tokenError?.message ||
+                tokenError;
+            console.error(
+                `[orderService] Token refresh failed for ${accountLabel}:`,
+                tokenError?.response?.data || tokenError
+            );
+            await logError({
+                itemId: 'N/A',
+                errorType: 'TOKEN_REFRESH_ERROR',
+                errorMessage: typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
+                attemptNumber: 1,
+                additionalInfo: {
+                    functionName: 'saveOrdersAndBuyers.refreshEbayToken',
+                    ebayUserId,
+                    accountId,
+                },
+            });
+            continue;
+        }
+
+        try {
             const orders = await fetchOrdersFromEbay(accessToken);
 
             const legacyItemIds = orders.flatMap(order => order.lineItems.map(item => item.legacyItemId));
@@ -822,13 +905,18 @@ async function saveOrdersAndBuyers(userId) {
                         attemptNumber: 1,  // 任意のリトライ回数を指定可能
                         additionalInfo: {
                             functionName: 'saveOrdersAndBuyers',
+                            ebayUserId,
+                            accountId,
                         }
                     });
 
                 }
             }
         } catch (error) {
-            console.error('注文の取得または処理の失敗:', error);
+            console.error(
+                `[orderService] Failed to fetch or process orders for ${accountLabel}:`,
+                error
+            );
             // itemIdを利用できる場合はログに追加
             const itemId = error?.item?.ItemID?.[0] || 'N/A';
 
@@ -839,6 +927,8 @@ async function saveOrdersAndBuyers(userId) {
                 attemptNumber: 1,  // 任意のリトライ回数を指定可能
                 additionalInfo: {
                     functionName: 'saveOrdersAndBuyers',
+                    ebayUserId,
+                    accountId,
                 }
             });
         }
@@ -862,11 +952,15 @@ async function getOrdersByUserId(userId) {
 
 // ebay上で未発送かつ発送後のmsgを送っていないデータを取得
 async function fetchRelevantOrders(userId) {
+    const threeMonthsAgo = new Date();
+    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+
     const { data, error } = await supabase
         .from('orders')
         .select('*, order_line_items(*)')
         .eq('user_id', userId)
         .or('shipping_status.neq.SHIPPED,delivered_msg_status.neq.SEND')
+        .gte('order_date', threeMonthsAgo.toISOString())
         .neq('status', 'FULLY_REFUNDED')
         .order('order_date', { ascending: false })
         .order('created_at', { ascending: true, foreignTable: 'order_line_items' });
