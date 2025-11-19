@@ -11,6 +11,9 @@ router.put('/line-items/:lineItemId/procurement-status', orderController.updateP
 // 注文明細の追跡番号更新
 router.put('/line-items/:lineItemId/procurement-tracking', orderController.updateProcurementTrackingNumber);
 
+// 注文のeBay追跡情報アップロード
+router.post('/:orderNo/tracking', orderController.uploadTrackingInfo);
+
 // 発送ステータスを一括でSHIPPEDに更新
 router.put('/shipping-status/bulk', orderController.markOrdersAsShipped);
 

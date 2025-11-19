@@ -51,6 +51,36 @@ exports.updateProcurementTrackingNumber = async (req, res) => {
     }
 };
 
+exports.uploadTrackingInfo = async (req, res) => {
+    const { orderNo } = req.params;
+    const {
+        trackingNumber,
+        carrierCode,
+        shippingServiceCode,
+        shippedDate,
+        lineItems,
+    } = req.body || {};
+
+    if (!trackingNumber || !carrierCode) {
+        return res.status(400).json({ error: 'trackingNumber and carrierCode are required' });
+    }
+
+    try {
+        const updatedOrder = await orderService.uploadTrackingInfoToEbay({
+            orderNo,
+            trackingNumber,
+            carrierCode,
+            shippingServiceCode,
+            shippedDate,
+            lineItems,
+        });
+        res.json(updatedOrder);
+    } catch (error) {
+        console.error('Failed to upload tracking info to eBay:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
 // 発送ステータスを一括でSHIPPEDに更新
 exports.markOrdersAsShipped = async (req, res) => {
     const { orderIds } = req.body;
