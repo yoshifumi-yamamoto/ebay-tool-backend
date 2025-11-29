@@ -40,6 +40,20 @@ exports.getAccountsByUserId = async (userId) => {
     return data;
 };
 
+exports.getAccountById = async (id) => {
+    const { data, error } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+    if (error) {
+        throw new Error('Failed to retrieve account: ' + error.message);
+    }
+
+    return data;
+};
+
 exports.updateAccount = async (id, accountData) => {
     const { data, error } = await supabase
         .from('accounts')
