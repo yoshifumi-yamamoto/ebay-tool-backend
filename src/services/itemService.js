@@ -211,7 +211,17 @@ async function updateItemsTable(listings, userId, ebayUserId) {
     const syncedAt = new Date().toISOString(); // 同期した日時を取得
 
     for (const listing of listings) {
-        const { legacyItemId, title, category_id, category_name, category_path } = listing;
+        const {
+            legacyItemId,
+            item_title,
+            category_id,
+            category_name,
+            category_path,
+            current_price_value,
+            current_price_currency,
+            primary_image_url,
+            view_item_url
+        } = listing;
 
         try {
             // itemsテーブル内の一致するデータを検索
@@ -230,7 +240,17 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                 await retryFetch(async () => {
                     const { error } = await supabase
                         .from('items')
-                        .update({ last_synced_at: syncedAt, category_id, category_name, category_path, title })
+                        .update({
+                            last_synced_at: syncedAt,
+                            category_id,
+                            category_name,
+                            category_path,
+                            item_title,
+                            current_price_value,
+                            current_price_currency,
+                            primary_image_url,
+                            view_item_url
+                        })
                         .eq('ebay_item_id', legacyItemId);
                     if (error) throw error;
                 });
@@ -239,7 +259,20 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                 await retryFetch(async () => {
                     const { error } = await supabase
                         .from('items')
-                        .insert({ ebay_item_id: legacyItemId, user_id: userId, title, ebay_user_id: ebayUserId, last_synced_at: syncedAt, category_id, category_name, category_path });
+                        .insert({
+                            ebay_item_id: legacyItemId,
+                            user_id: userId,
+                            item_title,
+                            ebay_user_id: ebayUserId,
+                            last_synced_at: syncedAt,
+                            category_id,
+                            category_name,
+                            category_path,
+                            current_price_value,
+                            current_price_currency,
+                            primary_image_url,
+                            view_item_url
+                        });
                     if (error) throw error;
                 });
             }
@@ -282,15 +315,22 @@ async function syncActiveListingsForUser(userId) {
             let listings = [];
             for (const itemId of firstPageItemIds) {
                 const itemDetails = await fetchItemDetails(itemId, authToken);
-                if (itemDetails && itemDetails.PrimaryCategoryID) {
-                    listings.push({
-                        legacyItemId: itemId,
-                        category_id: itemDetails.PrimaryCategoryID,
-                        category_name: itemDetails.PrimaryCategoryName,
-                        category_path: itemDetails.PrimaryCategoryIDPath,
-                        title: itemDetails.Title,
-                    });
-                }
+                if (!itemDetails || !itemDetails.PrimaryCategoryID) continue;
+                const currentPrice = itemDetails.StartPrice || itemDetails.SellingStatus?.CurrentPrice;
+                const primaryImage = Array.isArray(itemDetails.PictureDetails?.PictureURL)
+                    ? itemDetails.PictureDetails.PictureURL[0]
+                    : itemDetails.PictureDetails?.PictureURL;
+                listings.push({
+                    legacyItemId: itemId,
+                    category_id: itemDetails.PrimaryCategoryID,
+                    category_name: itemDetails.PrimaryCategoryName,
+                    category_path: itemDetails.PrimaryCategoryIDPath,
+                    item_title: itemDetails.Title,
+                    current_price_value: currentPrice?._,
+                    current_price_currency: currentPrice?.$.currencyID,
+                    primary_image_url: primaryImage || null,
+                    view_item_url: itemDetails?.ListingDetails?.ViewItemURL || null
+                });
             }
             await updateItemsTable(listings, userId, ebayUserId);
 
@@ -306,15 +346,22 @@ async function syncActiveListingsForUser(userId) {
                     listings = [];
                     for (const itemId of pageItemIds) {
                         const itemDetails = await fetchItemDetails(itemId, authToken);
-                        if (itemDetails && itemDetails.PrimaryCategoryID) {
-                            listings.push({
-                                legacyItemId: itemId,
-                                category_id: itemDetails.PrimaryCategoryID,
-                                category_name: itemDetails.PrimaryCategoryName,
-                                category_path: itemDetails.PrimaryCategoryIDPath,
-                                title: itemDetails.Title,
-                            });
-                        }
+                        if (!itemDetails || !itemDetails.PrimaryCategoryID) continue;
+                        const currentPrice = itemDetails.StartPrice || itemDetails.SellingStatus?.CurrentPrice;
+                        const primaryImage = Array.isArray(itemDetails.PictureDetails?.PictureURL)
+                            ? itemDetails.PictureDetails.PictureURL[0]
+                            : itemDetails.PictureDetails?.PictureURL;
+                        listings.push({
+                            legacyItemId: itemId,
+                            category_id: itemDetails.PrimaryCategoryID,
+                            category_name: itemDetails.PrimaryCategoryName,
+                            category_path: itemDetails.PrimaryCategoryIDPath,
+                            item_title: itemDetails.Title,
+                            current_price_value: currentPrice?._,
+                            current_price_currency: currentPrice?.$.currencyID,
+                            primary_image_url: primaryImage || null,
+                            view_item_url: itemDetails?.ListingDetails?.ViewItemURL || null
+                        });
                     }
                     await updateItemsTable(listings, userId, ebayUserId);
                 } catch (pageError) {
