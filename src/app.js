@@ -26,6 +26,7 @@ const csvRoutes = require('./routes/csvRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const itemSearchRoutes = require('./routes/itemSearchRoutes');
 const marketingRoutes = require('./routes/marketingRoutes');
+const webhookRoutes = require('./routes/webhookRoutes');
 
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
@@ -113,6 +114,7 @@ app.use('/api/csv', csvRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/item-search', itemSearchRoutes);
 app.use('/api/marketing', marketingRoutes);
+app.use('/api/webhooks', webhookRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {

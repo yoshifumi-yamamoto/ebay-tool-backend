@@ -510,6 +510,31 @@ paths:
           schema: { type: integer }
       responses:
         '200': { description: OK }
+  /webhooks:
+    get:
+      summary: List webhooks by account
+      parameters:
+        - in: query
+          name: accountId
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+    post:
+      summary: Create webhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                accountId: { type: integer }
+                url: { type: string, format: uri }
+                event_type: { type: string }
+                is_active: { type: boolean }
+      responses:
+        '201': { description: Created }
 components:
   schemas:
     User:
