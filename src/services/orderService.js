@@ -656,6 +656,19 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     const existingShippingCost = toNumberOrNull(existingData?.shipping_cost);
     const fallbackShippingCost = toNumberOrNull(shippingCost);
 
+    const existingParcelWeight = toNumberOrNull(existingData?.shipco_parcel_weight);
+    const existingParcelWeightUnit =
+        typeof existingData?.shipco_parcel_weight_unit === 'string'
+            ? existingData.shipco_parcel_weight_unit
+            : null;
+    const existingParcelLength = toNumberOrNull(existingData?.shipco_parcel_length);
+    const existingParcelWidth = toNumberOrNull(existingData?.shipco_parcel_width);
+    const existingParcelHeight = toNumberOrNull(existingData?.shipco_parcel_height);
+    const existingParcelDimensionUnit =
+        typeof existingData?.shipco_parcel_dimension_unit === 'string'
+            ? existingData.shipco_parcel_dimension_unit
+            : null;
+
     const needsShipcoForTracking =
         !shippingTrackingNumber && !existingData?.shipping_tracking_number;
     const shippingCostEqualsFallback =
@@ -666,15 +679,25 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         existingShippingCost === null ||
         existingShippingCost === 0 ||
         shippingCostEqualsFallback;
+    const needsShipcoForParcel =
+        existingParcelWeight === null ||
+        existingParcelWeightUnit === null ||
+        existingParcelLength === null ||
+        existingParcelWidth === null ||
+        existingParcelHeight === null ||
+        existingParcelDimensionUnit === null;
 
     let shipcoDetails = null;
     if (shouldSkipShipcoIntegration) {
         console.info(
             `[orderService] Ship&Co lookup skipped for order ${order.orderId} because shipping_status is ${shippingStatusRaw || 'unset'}`
         );
-    } else if (!existingShipcoSyncedAt && (needsShipcoForTracking || needsShipcoForShippingCost)) {
+    } else if (
+        needsShipcoForParcel ||
+        (!existingShipcoSyncedAt && (needsShipcoForTracking || needsShipcoForShippingCost))
+    ) {
         console.info(
-            `[orderService] Attempting Ship&Co lookup for order ${order.orderId}. (trackingNeeded=${needsShipcoForTracking}, shippingCostNeeded=${needsShipcoForShippingCost})`
+            `[orderService] Attempting Ship&Co lookup for order ${order.orderId}. (trackingNeeded=${needsShipcoForTracking}, shippingCostNeeded=${needsShipcoForShippingCost}, parcelNeeded=${needsShipcoForParcel})`
         );
         try {
             shipcoDetails = await fetchShipmentDetailsByReference(order.orderId);
@@ -728,6 +751,41 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         resolvedShippingCost = fallbackShippingCost;
     }
 
+    let resolvedParcelWeight = existingParcelWeight;
+    let resolvedParcelWeightUnit = existingParcelWeightUnit;
+    let resolvedParcelLength = existingParcelLength;
+    let resolvedParcelWidth = existingParcelWidth;
+    let resolvedParcelHeight = existingParcelHeight;
+    let resolvedParcelDimensionUnit = existingParcelDimensionUnit;
+
+    if (shipcoDetails?.parcel) {
+        const parcel = shipcoDetails.parcel;
+        if (resolvedParcelWeight === null && parcel.weight !== null) {
+            resolvedParcelWeight = parcel.weight;
+            shipcoDataApplied = true;
+        }
+        if (resolvedParcelWeightUnit === null && parcel.weightUnit) {
+            resolvedParcelWeightUnit = parcel.weightUnit;
+            shipcoDataApplied = true;
+        }
+        if (resolvedParcelLength === null && parcel.length !== null) {
+            resolvedParcelLength = parcel.length;
+            shipcoDataApplied = true;
+        }
+        if (resolvedParcelWidth === null && parcel.width !== null) {
+            resolvedParcelWidth = parcel.width;
+            shipcoDataApplied = true;
+        }
+        if (resolvedParcelHeight === null && parcel.height !== null) {
+            resolvedParcelHeight = parcel.height;
+            shipcoDataApplied = true;
+        }
+        if (resolvedParcelDimensionUnit === null && parcel.dimensionUnit) {
+            resolvedParcelDimensionUnit = parcel.dimensionUnit;
+            shipcoDataApplied = true;
+        }
+    }
+
     const shipcoSyncedAt =
         shipcoDataApplied
             ? new Date().toISOString()
@@ -757,6 +815,12 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         shipping_cost: resolvedShippingCost,
         shipping_tracking_number:
             shippingTrackingNumber || (existingData ? existingData.shipping_tracking_number : null),
+        shipco_parcel_weight: resolvedParcelWeight,
+        shipco_parcel_weight_unit: resolvedParcelWeightUnit,
+        shipco_parcel_length: resolvedParcelLength,
+        shipco_parcel_width: resolvedParcelWidth,
+        shipco_parcel_height: resolvedParcelHeight,
+        shipco_parcel_dimension_unit: resolvedParcelDimensionUnit,
         total_amount_currency: totalAmountCurrency,
         subtotal_currency: subtotalCurrency,
         earnings_currency: earningsCurrency,

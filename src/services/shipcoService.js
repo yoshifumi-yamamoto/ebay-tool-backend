@@ -140,6 +140,64 @@ const extractDeliveryRateFromShipment = (shipment = {}) => {
     };
 };
 
+const toNumberOrNull = (value) => {
+    if (value === undefined || value === null) {
+        return null;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+};
+
+const extractFirstParcelFromShipment = (shipment = {}) => {
+    const parcels = Array.isArray(shipment?.parcels) ? shipment.parcels : [];
+    if (parcels.length === 0) {
+        return null;
+    }
+    const parcel = parcels[0] || {};
+
+    const weight = toNumberOrNull(parcel.weight ?? parcel.weight_value ?? parcel.weightValue);
+    const weightUnit =
+        typeof parcel.weight_unit === 'string'
+            ? parcel.weight_unit
+            : typeof parcel.weightUnit === 'string'
+                ? parcel.weightUnit
+                : null;
+
+    const length = toNumberOrNull(
+        parcel.length ?? parcel.depth ?? parcel.length_value ?? parcel.lengthValue
+    );
+    const width = toNumberOrNull(parcel.width ?? parcel.width_value ?? parcel.widthValue);
+    const height = toNumberOrNull(parcel.height ?? parcel.height_value ?? parcel.heightValue);
+    const dimensionUnit =
+        typeof parcel.dimension_unit === 'string'
+            ? parcel.dimension_unit
+            : typeof parcel.dimensionUnit === 'string'
+                ? parcel.dimensionUnit
+                : null;
+
+    if (
+        weight === null &&
+        length === null &&
+        width === null &&
+        height === null &&
+        weightUnit === null &&
+        dimensionUnit === null
+    ) {
+        return null;
+    }
+
+    return {
+        weight,
+        weightUnit: weightUnit || (weight !== null ? 'g' : null),
+        length,
+        width,
+        height,
+        dimensionUnit:
+            dimensionUnit ||
+            (length !== null || width !== null || height !== null ? 'cm' : null),
+    };
+};
+
 const fetchShipmentDetailsByReference = async (reference) => {
     if (!reference) {
         return null;
@@ -178,6 +236,7 @@ const fetchShipmentDetailsByReference = async (reference) => {
         }
         const tracking = extractTrackingFromShipment(targetShipment);
         const deliveryRate = extractDeliveryRateFromShipment(targetShipment);
+        const parcel = extractFirstParcelFromShipment(targetShipment);
 
         if (tracking) {
             console.info(
@@ -199,11 +258,18 @@ const fetchShipmentDetailsByReference = async (reference) => {
                 `[shipcoService] No shipping cost found in shipment for reference ${reference}`
             );
         }
+        if (parcel) {
+            console.info(
+                `[shipcoService] Extracted parcel details for reference ${reference}:`,
+                parcel
+            );
+        }
 
         return {
             trackingNumber: tracking || null,
             deliveryRate: deliveryRate.amount,
             deliveryCurrency: deliveryRate.currency,
+            parcel,
         };
     } catch (error) {
         logError('shipcoService.fetchTrackingByReference', error);
