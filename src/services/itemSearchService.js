@@ -247,4 +247,37 @@ async function searchItems(queryParams) {
   };
 }
 
-module.exports = { searchItems, getOrdersForMonth };
+async function searchItemsSimple(queryParams) {
+  const { user_id, listing_title, ebay_item_id, limit = 200 } = queryParams;
+
+  if (!user_id) {
+    throw new Error('user_id is required');
+  }
+
+  const numericLimit = Number.isFinite(Number(limit)) ? Number(limit) : 200;
+  let query = supabase
+    .from('items')
+    .select('ebay_item_id, title, stocking_url, cost_price, shipping_cost, current_price_value, current_price_currency')
+    .eq('user_id', user_id)
+    .order('updated_at', { ascending: false })
+    .limit(numericLimit);
+
+  if (listing_title) {
+    const normalizedTitle = listing_title.trim();
+    const tokenizedPattern = normalizedTitle.replace(/\s+/g, '%');
+    query = query.ilike('title', `%${tokenizedPattern}%`);
+  }
+
+  if (ebay_item_id) {
+    query = query.eq('ebay_item_id', ebay_item_id);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`Error fetching items: ${error.message}`);
+  }
+
+  return { items: data || [] };
+}
+
+module.exports = { searchItems, getOrdersForMonth, searchItemsSimple };

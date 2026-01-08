@@ -1,4 +1,4 @@
-const { searchItems } = require('../services/itemSearchService');
+const { searchItems, searchItemsSimple } = require('../services/itemSearchService');
 
 async function getItems(req, res) {
   console.log(("getItems"))
@@ -20,4 +20,24 @@ async function getItems(req, res) {
     }
 }
 
-module.exports = { getItems };
+async function getItemsSimple(req, res) {
+    try {
+        const { userId, listing_title, ebay_item_id, report_month, limit } = req.query;
+        if (!userId) {
+            return res.status(400).json({ error: 'userId is required' });
+        }
+        const result = await searchItemsSimple({
+            user_id: userId,
+            listing_title,
+            ebay_item_id,
+            report_month,
+            limit,
+        });
+        return res.status(200).json(result);
+    } catch (error) {
+        console.error('Error in getItemsSimple:', error.message);
+        return res.status(500).json({ error: 'Failed to retrieve items' });
+    }
+}
+
+module.exports = { getItems, getItemsSimple };
