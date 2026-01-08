@@ -4,6 +4,7 @@ const orderController = require('../controllers/orderController');
 
 // 特定のユーザーIDに紐づくすべての注文情報を取得
 router.get('/user', orderController.getOrdersByUserId);
+router.get('/archived', orderController.getArchivedOrdersByUserId);
 
 // 注文明細の仕入ステータス更新
 router.put('/line-items/:lineItemId/procurement-status', orderController.updateProcurementStatus);

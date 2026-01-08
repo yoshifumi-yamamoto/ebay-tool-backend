@@ -1,31 +1,46 @@
 const supabase = require('../supabaseClient');
+const { getAccountsByUserId } = require('./accountService');
 const { Parser } = require('json2csv');
 
 exports.fetchListingsSummary = async (filters) => {
   const { start_date, end_date, user_id } = filters;
+  if (!user_id) {
+    throw new Error('user_id is required');
+  }
+  if (!start_date || !end_date) {
+    throw new Error('start_date and end_date are required');
+  }
 
-  // itemsテーブルからデータを取得
-  let itemsQuery = supabase
+  const itemFields = 'exhibit_date, research_date, researcher, exhibitor, ebay_user_id';
+
+  const exhibitQuery = supabase
     .from('items')
-    .select('exhibit_date, research_date, researcher, exhibitor, ebay_user_id')
+    .select(itemFields)
     .eq('user_id', user_id)
-    // .or(`exhibit_date.gte.${start_date},exhibit_date.lte.${end_date}`)
-    // .or(`research_date.gte.${start_date},research_date.lte.${end_date}`);
-    .or(
-      `and(exhibit_date.gte.${start_date},exhibit_date.lte.${end_date}),and(research_date.gte.${start_date},research_date.lte.${end_date})`
-    )
-    
+    .gte('exhibit_date', start_date)
+    .lte('exhibit_date', end_date);
 
-  const { data: itemsData, error: itemsError } = await itemsQuery;
-  if (itemsError) {
-    console.error('Error fetching items data:', itemsError.message);
-    throw itemsError;
+  const researchQuery = supabase
+    .from('items')
+    .select(itemFields)
+    .eq('user_id', user_id)
+    .gte('research_date', start_date)
+    .lte('research_date', end_date);
+
+  const [{ data: exhibitItems, error: exhibitError }, { data: researchItems, error: researchError }] =
+    await Promise.all([exhibitQuery, researchQuery]);
+
+  if (exhibitError || researchError) {
+    const message = exhibitError?.message || researchError?.message || 'unknown error';
+    console.error('Error fetching items data:', message);
+    throw exhibitError || researchError;
   }
 
   // ordersテーブルからデータを取得
   let ordersQuery = supabase
     .from('orders')
     .select('order_date, researcher')
+    .eq('user_id', user_id)
     .gte('order_date', start_date)
     .lte('order_date', end_date);
 
@@ -40,26 +55,38 @@ exports.fetchListingsSummary = async (filters) => {
   let totalExhibitCount = 0;
   const accountSummary = {};
 
-  for (const item of itemsData) {
-    const { researcher, exhibitor, exhibit_date, research_date, ebay_user_id } = item;
+  for (const item of exhibitItems || []) {
+    const { exhibitor, ebay_user_id } = item;
+    if (!listingsSummary[exhibitor]) {
+      listingsSummary[exhibitor] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
+    }
+    listingsSummary[exhibitor].exhibitCount++;
+    totalExhibitCount++;
 
-    // 出品カウント
-    if (exhibit_date && exhibit_date >= start_date && exhibit_date <= end_date) {
-      if (!listingsSummary[exhibitor]) listingsSummary[exhibitor] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
-      listingsSummary[exhibitor].exhibitCount++;
-
-      totalExhibitCount++;
-
+    if (ebay_user_id) {
       if (!accountSummary[ebay_user_id]) accountSummary[ebay_user_id] = 0;
       accountSummary[ebay_user_id]++;
     }
-
-    // リサーチカウント
-    if (research_date && research_date >= start_date && research_date <= end_date) {
-      if (!listingsSummary[researcher]) listingsSummary[researcher] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
-      listingsSummary[researcher].researchCount++;
-    }
   }
+
+  for (const item of researchItems || []) {
+    const { researcher } = item;
+    if (!listingsSummary[researcher]) {
+      listingsSummary[researcher] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
+    }
+    listingsSummary[researcher].researchCount++;
+  }
+
+  const accounts = await getAccountsByUserId(user_id);
+  accounts.forEach((account) => {
+    const ebayUserId = account?.ebay_user_id;
+    if (!ebayUserId) {
+      return;
+    }
+    if (!accountSummary[ebayUserId]) {
+      accountSummary[ebayUserId] = 0;
+    }
+  });
 
   ordersData.forEach(order => {
     const { researcher } = order;

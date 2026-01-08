@@ -28,6 +28,8 @@ const itemSearchRoutes = require('./routes/itemSearchRoutes');
 const marketingRoutes = require('./routes/marketingRoutes');
 const webhookRoutes = require('./routes/webhookRoutes');
 const caseRoutes = require('./routes/caseRoutes');
+const systemErrorRoutes = require('./routes/systemErrorRoutes');
+const packingVerificationRoutes = require('./routes/packingVerificationRoutes');
 
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
@@ -117,6 +119,8 @@ app.use('/api/item-search', itemSearchRoutes);
 app.use('/api/marketing', marketingRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/cases', caseRoutes);
+app.use('/api/system-errors', systemErrorRoutes);
+app.use('/api/packing-verification', packingVerificationRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {

@@ -22,5 +22,11 @@ router.post('/upload-acrive-listings', upload.single('file'), (req, res, next) =
   next(); // 次のミドルウェアへ
 }, csvController.processActiveListingsCSVUpload);
 
+router.post('/upload-shipping-costs', upload.single('file'), (req, res, next) => {
+  console.log('Received request body:', req.body);
+  console.log('Received file:', req.file);
+  next();
+}, csvController.processShippingCostsCSVUpload);
+
 
 module.exports = router;

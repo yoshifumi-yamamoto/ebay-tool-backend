@@ -140,6 +140,22 @@ const extractDeliveryRateFromShipment = (shipment = {}) => {
     };
 };
 
+const extractCarrierFromShipment = (shipment = {}) => {
+    const delivery = shipment?.delivery;
+    if (!delivery || typeof delivery !== 'object') {
+        return null;
+    }
+    const candidate =
+        delivery.carrier ||
+        delivery.carrier_code ||
+        delivery.carrierCode ||
+        delivery.service ||
+        delivery.service_code ||
+        delivery.serviceCode ||
+        null;
+    return typeof candidate === 'string' ? candidate.trim() : candidate ? String(candidate).trim() : null;
+};
+
 const toNumberOrNull = (value) => {
     if (value === undefined || value === null) {
         return null;
@@ -237,6 +253,7 @@ const fetchShipmentDetailsByReference = async (reference) => {
         const tracking = extractTrackingFromShipment(targetShipment);
         const deliveryRate = extractDeliveryRateFromShipment(targetShipment);
         const parcel = extractFirstParcelFromShipment(targetShipment);
+        const carrier = extractCarrierFromShipment(targetShipment);
 
         if (tracking) {
             console.info(
@@ -264,12 +281,19 @@ const fetchShipmentDetailsByReference = async (reference) => {
                 parcel
             );
         }
+        if (carrier) {
+            console.info(
+                `[shipcoService] Extracted carrier for reference ${reference}:`,
+                carrier
+            );
+        }
 
         return {
             trackingNumber: tracking || null,
             deliveryRate: deliveryRate.amount,
             deliveryCurrency: deliveryRate.currency,
             parcel,
+            carrier,
         };
     } catch (error) {
         logError('shipcoService.fetchTrackingByReference', error);

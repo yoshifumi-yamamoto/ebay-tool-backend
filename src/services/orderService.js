@@ -4,6 +4,7 @@ const { fetchEbayAccountTokens, refreshEbayToken, getRefreshTokenByEbayUserId } 
 const { fetchItemDetails } = require("./itemService")
 const { upsertBuyer } = require('./buyerService');
 const { logError } = require('./loggingService');
+const { logSystemError } = require('./systemErrorService');
 const { fetchShipmentDetailsByReference } = require('./shipcoService');
 
 const EBAY_FULFILLMENT_API_BASE = 'https://api.ebay.com/sell/fulfillment/v1';
@@ -129,19 +130,118 @@ const attachFinancialsToOrder = (order, exchangeRates) => {
 
 async function fetchOrdersFromEbay(refreshToken) {
     try {
-        const response = await axios({
-            method: 'get',
-            url: 'https://api.ebay.com/sell/fulfillment/v1/order',
-            headers: {
-                'Authorization': `Bearer ${refreshToken}`,
-                'Content-Type': 'application/json',
-            }
-        });
-        return response.data.orders;
+        const baseUrl = 'https://api.ebay.com/sell/fulfillment/v1/order';
+        const headers = {
+            Authorization: `Bearer ${refreshToken}`,
+            'Content-Type': 'application/json',
+        };
+
+        const fetchWithFilter = async (filter) => {
+            const response = await axios({
+                method: 'get',
+                url: baseUrl,
+                headers,
+                params: filter ? { filter } : undefined,
+            });
+            return response.data.orders || [];
+        };
+
+        return await fetchWithFilter(null);
     } catch (error) {
         console.error('Error fetching orders from eBay:', error);
         throw error;
     }
+}
+
+async function fetchCancelledOrderNosFromEbay(accessToken, marketplaceId = 'EBAY_US') {
+    const baseUrl = 'https://api.ebay.com/post-order/v2/cancellation/search';
+    const headers = {
+        Authorization: `IAF ${accessToken}`,
+        'Content-Type': 'application/json',
+        'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+    };
+
+    const now = new Date();
+    const fromDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const creationDateRangeFrom = fromDate.toISOString();
+    const creationDateRangeTo = now.toISOString();
+
+    const orderNos = new Set();
+    const limit = 200;
+    let offset = 0;
+
+    for (let page = 0; page < 50; page += 1) {
+        const response = await axios({
+            method: 'get',
+            url: baseUrl,
+            headers,
+            params: {
+                creation_date_range_from: creationDateRangeFrom,
+                creation_date_range_to: creationDateRangeTo,
+                limit,
+                offset,
+            },
+        });
+
+        const data = response?.data || {};
+        const cancellations =
+            data.cancellations ||
+            data.cancellationRequests ||
+            data.cancellation ||
+            [];
+
+        if (offset === 0 && Array.isArray(cancellations)) {
+            console.info(
+                '[orderService] Cancellation search result:',
+                `count=${cancellations.length}`,
+                `keys=${Object.keys(data || {}).join(',') || 'none'}`
+            );
+            const firstCancellation = cancellations[0] || null;
+            if (firstCancellation) {
+                console.info(
+                    '[orderService] Cancellation sample:',
+                    JSON.stringify({
+                        order_id: firstCancellation?.order_id,
+                        orderId: firstCancellation?.orderId,
+                        order: firstCancellation?.order
+                            ? {
+                                order_id: firstCancellation.order.order_id,
+                                orderId: firstCancellation.order.orderId,
+                            }
+                            : null,
+                        legacy_order_id: firstCancellation?.legacy_order_id,
+                        legacyOrderId: firstCancellation?.legacyOrderId,
+                    })
+                );
+            }
+        }
+
+        if (!Array.isArray(cancellations) || cancellations.length === 0) {
+            break;
+        }
+
+        cancellations.forEach((cancellation) => {
+            const orderNo =
+                cancellation?.order_id ||
+                cancellation?.orderId ||
+                cancellation?.legacy_order_id ||
+                cancellation?.legacyOrderId ||
+                cancellation?.order?.orderId ||
+                cancellation?.order?.order_id ||
+                null;
+            if (orderNo) {
+                orderNos.add(orderNo);
+            }
+        });
+
+        if (cancellations.length < limit) {
+            break;
+        }
+
+        offset += cancellations.length;
+    }
+
+    return Array.from(orderNos);
 }
 
 /**
@@ -275,6 +375,8 @@ function normalizeOrderLineItem(item = {}) {
         item_image: item.item_image ?? item.itemImage ?? null,
         procurement_tracking_number: item.procurement_tracking_number ?? item.procurementTrackingNumber ?? null,
         procurementTrackingNumber: item.procurementTrackingNumber ?? item.procurement_tracking_number ?? null,
+        procurement_site_name: item.procurement_site_name ?? item.procurementSiteName ?? null,
+        procurementSiteName: item.procurementSiteName ?? item.procurement_site_name ?? null,
         procurement_status: normalizedProcurementStatus,
         procurementStatus: normalizedProcurementStatus,
         stocking_status: normalizedProcurementStatus,
@@ -668,6 +770,10 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         typeof existingData?.shipco_parcel_dimension_unit === 'string'
             ? existingData.shipco_parcel_dimension_unit
             : null;
+    const existingShippingCarrier =
+        typeof existingData?.shipping_carrier === 'string'
+            ? existingData.shipping_carrier
+            : null;
 
     const needsShipcoForTracking =
         !shippingTrackingNumber && !existingData?.shipping_tracking_number;
@@ -686,6 +792,7 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         existingParcelWidth === null ||
         existingParcelHeight === null ||
         existingParcelDimensionUnit === null;
+    const needsShipcoForCarrier = !existingShippingCarrier;
 
     let shipcoDetails = null;
     if (shouldSkipShipcoIntegration) {
@@ -694,10 +801,11 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         );
     } else if (
         needsShipcoForParcel ||
+        needsShipcoForCarrier ||
         (!existingShipcoSyncedAt && (needsShipcoForTracking || needsShipcoForShippingCost))
     ) {
         console.info(
-            `[orderService] Attempting Ship&Co lookup for order ${order.orderId}. (trackingNeeded=${needsShipcoForTracking}, shippingCostNeeded=${needsShipcoForShippingCost}, parcelNeeded=${needsShipcoForParcel})`
+            `[orderService] Attempting Ship&Co lookup for order ${order.orderId}. (trackingNeeded=${needsShipcoForTracking}, shippingCostNeeded=${needsShipcoForShippingCost}, parcelNeeded=${needsShipcoForParcel}, carrierNeeded=${needsShipcoForCarrier})`
         );
         try {
             shipcoDetails = await fetchShipmentDetailsByReference(order.orderId);
@@ -757,6 +865,7 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     let resolvedParcelWidth = existingParcelWidth;
     let resolvedParcelHeight = existingParcelHeight;
     let resolvedParcelDimensionUnit = existingParcelDimensionUnit;
+    let resolvedShippingCarrier = existingShippingCarrier;
 
     if (shipcoDetails?.parcel) {
         const parcel = shipcoDetails.parcel;
@@ -784,6 +893,10 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
             resolvedParcelDimensionUnit = parcel.dimensionUnit;
             shipcoDataApplied = true;
         }
+    }
+    if (!resolvedShippingCarrier && shipcoDetails?.carrier) {
+        resolvedShippingCarrier = shipcoDetails.carrier;
+        shipcoDataApplied = true;
     }
 
     const shipcoSyncedAt =
@@ -815,6 +928,7 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         shipping_cost: resolvedShippingCost,
         shipping_tracking_number:
             shippingTrackingNumber || (existingData ? existingData.shipping_tracking_number : null),
+        shipping_carrier: resolvedShippingCarrier,
         shipco_parcel_weight: resolvedParcelWeight,
         shipco_parcel_weight_unit: resolvedParcelWeightUnit,
         shipco_parcel_length: resolvedParcelLength,
@@ -875,6 +989,17 @@ async function saveOrdersAndBuyers(userId) {
                     accountId,
                 },
             });
+            await logSystemError({
+                error_code: 'EBAY_TOKEN_REFRESH_FAILED',
+                category: 'AUTH',
+                severity: 'ERROR',
+                provider: 'ebay',
+                message: typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
+                retryable: false,
+                user_id: userId,
+                account_id: accountId,
+                payload_summary: { ebayUserId },
+            });
             continue;
         }
 
@@ -933,8 +1058,15 @@ async function saveOrdersAndBuyers(userId) {
             });
 
 
+            const debugOrderNo = process.env.DEBUG_ORDER_NO || '24-14010-37569';
             for (let order of orders) {
                 try {
+                    if (order?.orderId === debugOrderNo) {
+                        console.info(
+                            '[orderService] Debug eBay order payload:',
+                            JSON.stringify(order, null, 2)
+                        );
+                    }
                     const buyer = await fetchAndUpsertBuyer(order, userId);
                     if (!buyer) {
                         console.error("注文に対するバイヤーのアップサート失敗:", order);
@@ -977,6 +1109,39 @@ async function saveOrdersAndBuyers(userId) {
                     });
 
                 }
+            }
+
+            try {
+                const marketplaceId = account?.marketplace_id || process.env.EBAY_MARKETPLACE_ID || 'EBAY_US';
+                const cancelledOrderNos = await fetchCancelledOrderNosFromEbay(accessToken, marketplaceId);
+                if (cancelledOrderNos.length > 0) {
+                    let updateQuery = supabase
+                        .from('orders')
+                        .update({ status: 'CANCELED' })
+                        .in('order_no', cancelledOrderNos);
+                    if (ebayUserId) {
+                        updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
+                    }
+                    const { error: cancelUpdateError } = await updateQuery;
+                    if (cancelUpdateError) {
+                        console.error(
+                            '[orderService] Failed to update cancelled orders:',
+                            cancelUpdateError.message
+                        );
+                    } else {
+                        console.info(
+                            '[orderService] Cancelled orders updated:',
+                            `count=${cancelledOrderNos.length}`
+                        );
+                    }
+                } else {
+                    console.info('[orderService] No cancellations found for update.');
+                }
+            } catch (cancelError) {
+                console.error(
+                    '[orderService] Failed to fetch cancellations:',
+                    cancelError?.response?.data || cancelError?.message || cancelError
+                );
             }
         } catch (error) {
             console.error(
@@ -1028,11 +1193,37 @@ async function fetchRelevantOrders(userId) {
         .or('shipping_status.neq.SHIPPED,delivered_msg_status.neq.SEND')
         .gte('order_date', threeMonthsAgo.toISOString())
         .neq('status', 'FULLY_REFUNDED')
+        .neq('status', 'CANCELED')
         .order('order_date', { ascending: false })
         .order('created_at', { ascending: true, foreignTable: 'order_line_items' });
 
     if (error) {
         console.error('Error fetching relevant orders:', error.message);
+        return [];
+    }
+
+    const exchangeRates = await loadUserExchangeRates(userId);
+    return (data || [])
+        .map(attachNormalizedLineItemsToOrder)
+        .map((order) => attachFinancialsToOrder(order, exchangeRates));
+}
+
+async function fetchArchivedOrders(userId, statusFilter = null) {
+    let query = supabase
+        .from('orders')
+        .select('*, order_line_items(*)')
+        .eq('user_id', userId)
+        .order('order_date', { ascending: false });
+
+    if (statusFilter) {
+        query = query.eq('status', statusFilter);
+    } else {
+        query = query.in('status', ['CANCELED', 'FULLY_REFUNDED']);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+        console.error('Error fetching archived orders:', error.message);
         return [];
     }
 
@@ -1106,6 +1297,9 @@ async function updateOrder(orderId, orderData) {
                 }
                 if (normalized.procurement_tracking_number !== undefined) {
                     fields.procurement_tracking_number = normalized.procurement_tracking_number || null;
+                }
+                if (normalized.procurement_site_name !== undefined) {
+                    fields.procurement_site_name = normalized.procurement_site_name || null;
                 }
                 if (normalized.procurement_url !== undefined) {
                     fields.procurement_url = normalized.procurement_url || null;
@@ -1344,6 +1538,19 @@ async function uploadTrackingInfoToEbay({
                 status: error?.response?.status,
             },
         });
+        await logSystemError({
+            error_code: 'EBAY_TRACKING_UPLOAD_FAILED',
+            category: 'EXTERNAL',
+            severity: 'ERROR',
+            provider: 'ebay',
+            message: error.message || 'Failed to upload tracking',
+            retryable: true,
+            payload_summary: { orderNo },
+            details: {
+                status: error?.response?.status,
+                response: ebayErrorPayload,
+            },
+        });
         throw new Error('Failed to upload tracking information to eBay');
     }
 
@@ -1455,6 +1662,7 @@ module.exports = {
     saveOrdersAndBuyers,
     getOrdersByUserId,
     fetchRelevantOrders,
+    fetchArchivedOrders,
     updateOrder,
     fetchLastWeekOrders,
     updateProcurementStatus,

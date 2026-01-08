@@ -222,6 +222,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
       `)
       .eq('user_id', user_id)
       .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
+      .neq('status', 'CANCELED')
       .gte('order_date', start_date)
       .lte('order_date', end_date)
       .order('order_date', { ascending: true }); // order_dateで昇順に並び替え
@@ -267,6 +268,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
       .select('id', { count: 'exact' })
       .eq('user_id', user_id)
       .neq('status', 'FULLY_REFUNDED') // FULLY_REFUNDEDステータスを除外
+      .neq('status', 'CANCELED')
       .gte('order_date', start_date)
       .lte('order_date', end_date);
 
@@ -298,6 +300,7 @@ exports.fetchOrderSummary = async (filters) => {
     .select('id, total_amount, total_amount_currency, earnings, earnings_currency, earnings_after_pl_fee, earnings_after_pl_fee_currency, subtotal, subtotal_currency, shipping_cost, researcher, order_line_items(*)')
     .eq('user_id', user_id)
     .neq('status', 'FULLY_REFUNDED')
+    .neq('status', 'CANCELED')
     .gte('order_date', start_date)
     .lte('order_date', end_date);
 

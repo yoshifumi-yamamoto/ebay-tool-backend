@@ -218,9 +218,100 @@ async function updateActiveListingsCSV(fileBuffer) {
         });
 }
 
+const normalizeHeader = (value) => {
+    if (value === undefined || value === null) return '';
+    return String(value).trim().toLowerCase();
+};
+
+const normalizeTrackingNumber = (value) => {
+    if (value === undefined || value === null) return '';
+    return String(value).trim();
+};
+
+async function updateShippingCostsFromCSV(fileBuffer, userId) {
+    const rows = [];
+
+    return new Promise((resolve, reject) => {
+        fileBuffer
+            .pipe(csv({
+                mapHeaders: ({ header }) => header.trim().replace(/^"|"$/g, '').replace(/^\uFEFF/, '')
+            }))
+            .on('data', (data) => rows.push(data))
+            .on('end', async () => {
+                try {
+                    let updated = 0;
+                    let skipped = 0;
+                    let failed = 0;
+
+                    for (const row of rows) {
+                        const entries = Object.entries(row).reduce((acc, [key, value]) => {
+                            acc[normalizeHeader(key)] = value;
+                            return acc;
+                        }, {});
+
+                        const trackingNumber =
+                            normalizeTrackingNumber(
+                                entries['tracking_number'] ||
+                                entries['tracking'] ||
+                                entries['tracking no'] ||
+                                entries['tracking number'] ||
+                                entries['trackingnumber']
+                            );
+                        const carrier =
+                            entries['shipping_carrier'] ||
+                            entries['carrier'] ||
+                            entries['shipping carrier'] ||
+                            entries['shipper'] ||
+                            null;
+                        const costRaw =
+                            entries['final_shipping_cost'] ||
+                            entries['final shipping cost'] ||
+                            entries['shipping_cost'] ||
+                            entries['shipping cost'] ||
+                            entries['cost'] ||
+                            null;
+
+                        if (!trackingNumber || costRaw === null || costRaw === undefined) {
+                            skipped += 1;
+                            continue;
+                        }
+
+                        const numericCost = Number(String(costRaw).replace(/[^0-9.-]/g, ''));
+                        if (!Number.isFinite(numericCost)) {
+                            skipped += 1;
+                            continue;
+                        }
+
+                        const { error } = await supabase
+                            .from('orders')
+                            .update({
+                                final_shipping_cost: numericCost,
+                                shipping_carrier: carrier ? String(carrier).trim() : null,
+                            })
+                            .eq('user_id', userId)
+                            .eq('shipping_tracking_number', trackingNumber);
+
+                        if (error) {
+                            console.error('Failed to update shipping cost:', error.message);
+                            failed += 1;
+                        } else {
+                            updated += 1;
+                        }
+                    }
+
+                    resolve({ updated, skipped, failed });
+                } catch (err) {
+                    reject(err);
+                }
+            })
+            .on('error', reject);
+    });
+}
+
 
 module.exports = {
     updateCategoriesFromCSV,
     updateTrafficFromCSV,
-    updateActiveListingsCSV
+    updateActiveListingsCSV,
+    updateShippingCostsFromCSV
 };

@@ -1,4 +1,4 @@
-const { updateCategoriesFromCSV, updateTrafficFromCSV, updateActiveListingsCSV } = require('../services/csvService');
+const { updateCategoriesFromCSV, updateTrafficFromCSV, updateActiveListingsCSV, updateShippingCostsFromCSV } = require('../services/csvService');
 const { Readable } = require('stream');
 
 const processCSVUpload = async (req, res) => {
@@ -93,7 +93,36 @@ const processActiveListingsCSVUpload = async (req, res) => {
     }
 };
 
+const processShippingCostsCSVUpload = async (req, res) => {
+    const { user_id } = req.body;
+
+    const file = req.file;
+
+    if (!file) {
+        console.error('No file uploaded');
+        return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    if (!user_id) {
+        console.error('user_id is required');
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    try {
+        const bufferStream = new Readable();
+        bufferStream.push(file.buffer);
+        bufferStream.push(null);
+
+        const result = await updateShippingCostsFromCSV(bufferStream, user_id);
+        res.status(200).json({ message: 'Shipping costs CSV processed', result });
+    } catch (error) {
+        console.error('Error processing shipping costs CSV:', error.message);
+        res.status(500).json({ error: 'Error processing shipping costs CSV' });
+    }
+};
+
 module.exports = {
     processCSVUpload,
     processActiveListingsCSVUpload,
+    processShippingCostsCSVUpload,
 };

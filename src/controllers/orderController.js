@@ -1,4 +1,5 @@
 const orderService = require('../services/orderService');
+const { logSystemError } = require('../services/systemErrorService');
 
 // eBayの注文とバイヤー情報を同期
 exports.syncOrders = async (req, res) => {
@@ -9,6 +10,15 @@ exports.syncOrders = async (req, res) => {
         res.json(relevantOrders);
     } catch (error) {
         console.error('Failed to sync orders:', error);
+        await logSystemError({
+            error_code: 'ORDER_SYNC_FAILED',
+            category: 'EXTERNAL',
+            severity: 'ERROR',
+            provider: 'ebay',
+            message: error.message,
+            retryable: true,
+            user_id: userId,
+        });
         res.status(500).json({ error: error.message });
     }
 };
@@ -30,6 +40,15 @@ exports.updateProcurementStatus = async (req, res) => {
         res.json(updated);
     } catch (error) {
         console.error('Failed to update procurement status:', error);
+        await logSystemError({
+            error_code: 'PROCUREMENT_STATUS_UPDATE_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: false,
+            payload_summary: { lineItemId, procurementStatus },
+        });
         res.status(500).json({ error: error.message });
     }
 };
@@ -47,6 +66,15 @@ exports.updateProcurementTrackingNumber = async (req, res) => {
         res.json(updated);
     } catch (error) {
         console.error('Failed to update procurement tracking number:', error);
+        await logSystemError({
+            error_code: 'PROCUREMENT_TRACKING_UPDATE_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: false,
+            payload_summary: { lineItemId },
+        });
         res.status(500).json({ error: error.message });
     }
 };
@@ -77,6 +105,15 @@ exports.uploadTrackingInfo = async (req, res) => {
         res.json(updatedOrder);
     } catch (error) {
         console.error('Failed to upload tracking info to eBay:', error);
+        await logSystemError({
+            error_code: 'EBAY_TRACKING_UPLOAD_FAILED',
+            category: 'EXTERNAL',
+            severity: 'ERROR',
+            provider: 'ebay',
+            message: error.message,
+            retryable: true,
+            payload_summary: { orderNo },
+        });
         res.status(500).json({ error: error.message });
     }
 };
@@ -94,6 +131,15 @@ exports.markOrdersAsShipped = async (req, res) => {
         res.json({ updatedOrders });
     } catch (error) {
         console.error('Failed to update shipping status to SHIPPED:', error);
+        await logSystemError({
+            error_code: 'ORDER_SHIPPING_STATUS_BULK_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: false,
+            payload_summary: { orderIds },
+        });
         res.status(500).json({ error: error.message });
     }
 };
@@ -109,6 +155,39 @@ exports.getOrdersByUserId = async (req, res) => {
         const orders = await orderService.fetchRelevantOrders(userId);
         res.json(orders);
     } catch (error) {
+        await logSystemError({
+            error_code: 'ORDER_FETCH_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: true,
+            user_id: userId,
+        });
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// キャンセル/返金済みの注文一覧
+exports.getArchivedOrdersByUserId = async (req, res) => {
+    const userId = req.query.userId;
+    const status = req.query.status || null;
+    if (!userId) {
+        return res.status(400).json({ error: 'User ID is required' });
+    }
+    try {
+        const orders = await orderService.fetchArchivedOrders(userId, status);
+        res.json(orders);
+    } catch (error) {
+        await logSystemError({
+            error_code: 'ORDER_ARCHIVED_FETCH_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: true,
+            user_id: userId,
+        });
         res.status(500).json({ error: error.message });
     }
 };
@@ -131,6 +210,15 @@ exports.updateOrder = async (req, res) => {
         res.json(updatedOrder);
     } catch (error) {
         console.error('Update Order Error:', error); // エラー詳細をログに記録
+        await logSystemError({
+            error_code: 'ORDER_UPDATE_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: false,
+            payload_summary: { orderId },
+        });
         res.status(500).json({ error: error.message });
     }
 };
