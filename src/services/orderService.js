@@ -91,7 +91,7 @@ const calculateOrderFinancials = (order, exchangeRates) => {
         DEFAULT_PAYOUT_CURRENCY;
     const rate = exchangeRates[earningsCurrency];
     const earningsAfterFeeJpy = rate ? earningsAfterFee * rate : null;
-    const shippingCostJpy = toNumber(order.shipping_cost);
+    const shippingCostJpy = toNumber(order.estimated_shipping_cost);
     const costPriceJpy = sumCostPriceJpy(order.line_items || []);
     const profitJpy = earningsAfterFeeJpy !== null
         ? earningsAfterFeeJpy - shippingCostJpy - costPriceJpy
@@ -755,8 +755,9 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     const shouldSkipShipcoIntegration =
         normalizedShippingStatus === 'UNSHIPPED' || shippingStatusRaw === '未';
 
-    const existingShippingCost = toNumberOrNull(existingData?.shipping_cost);
+    const existingShippingCost = toNumberOrNull(existingData?.shipco_shipping_cost);
     const fallbackShippingCost = toNumberOrNull(shippingCost);
+    const existingEstimatedShippingCost = toNumberOrNull(existingData?.estimated_shipping_cost);
 
     const existingParcelWeight = toNumberOrNull(existingData?.shipco_parcel_weight);
     const existingParcelWeightUnit =
@@ -859,6 +860,11 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         resolvedShippingCost = fallbackShippingCost;
     }
 
+    let resolvedEstimatedShippingCost = existingEstimatedShippingCost;
+    if (resolvedEstimatedShippingCost === null && fallbackShippingCost !== null) {
+        resolvedEstimatedShippingCost = fallbackShippingCost;
+    }
+
     let resolvedParcelWeight = existingParcelWeight;
     let resolvedParcelWeightUnit = existingParcelWeightUnit;
     let resolvedParcelLength = existingParcelLength;
@@ -925,7 +931,8 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         subtotal: order.pricingSummary.priceSubtotal.value,
         earnings: order.paymentSummary.totalDueSeller.value, // 注文収益
         earnings_after_pl_fee: earningsAfterPlFee,
-        shipping_cost: resolvedShippingCost,
+        shipco_shipping_cost: resolvedShippingCost,
+        estimated_shipping_cost: resolvedEstimatedShippingCost,
         shipping_tracking_number:
             shippingTrackingNumber || (existingData ? existingData.shipping_tracking_number : null),
         shipping_carrier: resolvedShippingCarrier,
@@ -1079,7 +1086,7 @@ async function saveOrdersAndBuyers(userId) {
 
                     const primaryLineItemId = lineItems[0]?.lineItemId;
                     const primaryLegacyItemId = lineItems[0]?.legacyItemId;
-                    const shippingCost = primaryLegacyItemId ? (itemsMap[primaryLegacyItemId]?.shipping_cost || 0) : 0;
+                    const shippingCost = primaryLegacyItemId ? (itemsMap[primaryLegacyItemId]?.estimated_shipping_cost || 0) : 0;
 
                     const researcher =
                         (primaryLegacyItemId && itemsMap[primaryLegacyItemId]?.researcher) ||
@@ -1255,6 +1262,10 @@ async function updateOrder(orderId, orderData) {
                 updates[key] = rawUpdates[key];
             }
         });
+        if (updates.shipping_cost !== undefined && updates.estimated_shipping_cost === undefined) {
+            updates.estimated_shipping_cost = updates.shipping_cost;
+            delete updates.shipping_cost;
+        }
 
         const toNumberOrNull = (value) => {
             if (value === undefined || value === null || value === '') {
@@ -1264,8 +1275,8 @@ async function updateOrder(orderId, orderData) {
             return Number.isFinite(parsed) ? parsed : null;
         };
 
-        if (updates.shipping_cost !== undefined) {
-            updates.shipping_cost = toNumberOrNull(updates.shipping_cost);
+        if (updates.estimated_shipping_cost !== undefined) {
+            updates.estimated_shipping_cost = toNumberOrNull(updates.estimated_shipping_cost);
         }
 
         const lineItemsPayload = Array.isArray(orderLineItemsPayload)

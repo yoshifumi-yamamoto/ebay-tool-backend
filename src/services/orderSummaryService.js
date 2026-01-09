@@ -105,7 +105,7 @@ const calculateOrderFinancials = (order, exchangeRates) => {
   const earningsAfterFeeCurrency =
     normalizeCurrencyCode(order.earnings_after_pl_fee_currency) || earningsCurrency;
 
-  const shippingCostJpy = toNumber(order.shipping_cost);
+  const shippingCostJpy = toNumber(order.estimated_shipping_cost);
   const costPriceJpy = sumCostPrice(lineItems);
   const exchangeRate = getExchangeRateToJPY(earningsAfterFeeCurrency, exchangeRates);
   const earningsAfterFeeJpy =
@@ -211,7 +211,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
           earnings_currency,
           earnings_after_pl_fee,
           earnings_after_pl_fee_currency,
-          shipping_cost,
+          estimated_shipping_cost,
           subtotal,
           subtotal_currency,
           status,
@@ -297,7 +297,7 @@ exports.fetchOrderSummary = async (filters) => {
 
   let query = supabase
     .from('orders')
-    .select('id, total_amount, total_amount_currency, earnings, earnings_currency, earnings_after_pl_fee, earnings_after_pl_fee_currency, subtotal, subtotal_currency, shipping_cost, researcher, order_line_items(*)')
+    .select('id, total_amount, total_amount_currency, earnings, earnings_currency, earnings_after_pl_fee, earnings_after_pl_fee_currency, subtotal, subtotal_currency, estimated_shipping_cost, researcher, order_line_items(*)')
     .eq('user_id', user_id)
     .neq('status', 'FULLY_REFUNDED')
     .neq('status', 'CANCELED')
@@ -445,7 +445,7 @@ exports.downloadOrderSummaryCSV = async (filters) => {
         price: index === 0 ? order.earnings : '',
         net_total: index === 0 ? order.earnings_after_pl_fee : '',
         cost_price: item.cost_price,
-        shipping_cost: index === 0 ? order.shipping_cost : '',
+        shipping_cost: index === 0 ? order.estimated_shipping_cost : '',
         status: index === 0 ? order.status : '',
         buyer_country_code: index === 0 ? order.buyer_country_code : '',
         researcher: item.researcher || order.researcher,

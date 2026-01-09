@@ -36,7 +36,7 @@ exports.fetchPackingVerification = async (filters = {}) => {
       shipping_status,
       shipping_tracking_number,
       shipping_carrier,
-      shipping_cost,
+      shipco_shipping_cost,
       final_shipping_cost,
       shipco_parcel_weight,
       shipco_parcel_weight_unit,
@@ -64,7 +64,7 @@ exports.fetchPackingVerification = async (filters = {}) => {
   return {
     data: (data || []).map((row) => ({
       ...row,
-      shipping_cost: toNumberOrNull(row.shipping_cost),
+      shipco_shipping_cost: toNumberOrNull(row.shipco_shipping_cost),
       final_shipping_cost: toNumberOrNull(row.final_shipping_cost),
       shipco_parcel_weight: toNumberOrNull(row.shipco_parcel_weight),
       shipco_parcel_length: toNumberOrNull(row.shipco_parcel_length),

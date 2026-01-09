@@ -20,14 +20,14 @@ async function syncSheetToSupabase(req, res) {
             const { ebay_user_id, spreadsheet_id } = account;
 
             // ヘッダー行を読み取る
-            const headers = await readFromSheet(spreadsheet_id, 'A2:V2');
+            const headers = await readFromSheet(spreadsheet_id, 'A2:Z2');
             const headerMap = {};
             headers[0].forEach((header, index) => {
                 headerMap[header.trim()] = index;
             });
 
             // 必要な列を確認
-            const requiredHeaders = ['商品タイトル', '仕入れURL', '仕入価格', 'eBay URL', '目安送料', 'リサーチ担当', '出品担当', '出品作業日', 'リサーチ作業日'];
+            const requiredHeaders = ['商品タイトル', '仕入れURL', '仕入価格', 'eBay URL', '目安送料', '縦 (cm)', '横(cm)', '高さ(cm)', '発送重量(g)', 'リサーチ担当', '出品担当', '出品作業日', 'リサーチ作業日'];
             for (let header of requiredHeaders) {
                 if (!headerMap.hasOwnProperty(header)) {
                     throw new Error(`Missing required header: ${header}`);
@@ -35,7 +35,7 @@ async function syncSheetToSupabase(req, res) {
             }
 
             // データ行を読み取る
-            const rows = await readFromSheet(spreadsheet_id, `A3:V`);
+            const rows = await readFromSheet(spreadsheet_id, `A3:Z`);
 
             // 空行をフィルタリング
             const itemsFromSheet = rows
@@ -46,12 +46,20 @@ async function syncSheetToSupabase(req, res) {
                     const cost_price = row[headerMap['仕入価格']] || '';
                     const ebay_url = row[headerMap['eBay URL']] || '';
                     const shipping_cost = row[headerMap['目安送料']] || '';
+                    const estimated_length = row[headerMap['縦 (cm)']] || '';
+                    const estimated_width = row[headerMap['横(cm)']] || '';
+                    const estimated_height = row[headerMap['高さ(cm)']] || '';
+                    const estimated_weight = row[headerMap['発送重量(g)']] || '';
                     const researcher = row[headerMap['リサーチ担当']] || '';
                     const exhibitor = row[headerMap['出品担当']] || '';
                     const exhibit_date = row[headerMap['出品作業日']];
                     const research_date = row[headerMap['リサーチ作業日']];
                     const formattedShippingPrice = parseInt(shipping_cost.replace(/[^0-9]/g, '')) || 0; // ¥や,を除去
                     const formattedCostPrice = parseInt(cost_price.replace(/[^0-9]/g, '')) || 0; // ¥や,を除去
+                    const formattedLength = parseInt(String(estimated_length).replace(/[^0-9]/g, '')) || 0;
+                    const formattedWidth = parseInt(String(estimated_width).replace(/[^0-9]/g, '')) || 0;
+                    const formattedHeight = parseInt(String(estimated_height).replace(/[^0-9]/g, '')) || 0;
+                    const formattedWeight = parseInt(String(estimated_weight).replace(/[^0-9]/g, '')) || 0;
                     const ebay_item_id_match = ebay_url.match(/\/(\d+)(?:[\/?]|$)/);
                     const ebay_item_id = ebay_item_id_match ? ebay_item_id_match[1] : '';
 
@@ -60,7 +68,11 @@ async function syncSheetToSupabase(req, res) {
                         stocking_url,
                         cost_price: formattedCostPrice,
                         ebay_item_id,
-                        shipping_cost: formattedShippingPrice,
+                        estimated_shipping_cost: formattedShippingPrice,
+                        estimated_parcel_length: formattedLength || null,
+                        estimated_parcel_width: formattedWidth || null,
+                        estimated_parcel_height: formattedHeight || null,
+                        estimated_parcel_weight: formattedWeight || null,
                         researcher,
                         exhibitor,
                         exhibit_date,

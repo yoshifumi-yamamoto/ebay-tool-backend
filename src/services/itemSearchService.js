@@ -109,7 +109,7 @@ const filterOrdersByCategory = async (orders, category_id) => {
         
         // 利益計算
         const earningsAfterFee = order.earnings_after_pl_fee * 0.98;
-        const profit = earningsAfterFee - ((order.shipping_cost / USDJPY) || 0) - ((itemData.cost_price / USDJPY) || 0);
+        const profit = earningsAfterFee - ((order.estimated_shipping_cost / USDJPY) || 0) - ((itemData.cost_price / USDJPY) || 0);
         orderProfit += profit;
         totalProfit += profit;
       }
@@ -257,7 +257,7 @@ async function searchItemsSimple(queryParams) {
   const numericLimit = Number.isFinite(Number(limit)) ? Number(limit) : 200;
   let query = supabase
     .from('items')
-    .select('ebay_item_id, title, stocking_url, cost_price, shipping_cost, current_price_value, current_price_currency')
+    .select('ebay_item_id, title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency')
     .eq('user_id', user_id)
     .order('updated_at', { ascending: false })
     .limit(numericLimit);
