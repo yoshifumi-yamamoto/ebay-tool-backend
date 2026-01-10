@@ -283,7 +283,9 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
             try {
 
                 const itemDetails = await fetchItemDetails(item.legacyItemId, accessToken);
-                itemImage = itemDetails ? itemDetails.PictureDetails.PictureURL[0] : null;
+                itemImage = itemDetails
+                    ? selectItemImageUrl(itemDetails.PictureDetails, itemDetails.GalleryURL)
+                    : null;
             } catch (error) {
 
                 console.error('商品画像の取得エラー:', error.message);
@@ -299,6 +301,35 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
             cost_price: itemData ? itemData.cost_price : null
         };
     }));
+}
+
+function isValidImageUrl(value) {
+    if (!value || typeof value !== 'string') {
+        return false;
+    }
+    const trimmed = value.trim();
+    if (trimmed.length < 8) {
+        return false;
+    }
+    return trimmed.startsWith('http://') || trimmed.startsWith('https://');
+}
+
+function selectItemImageUrl(pictureDetails = {}, fallbackGalleryUrl = null) {
+    const candidates = [];
+    if (pictureDetails) {
+        if (Array.isArray(pictureDetails.PictureURL)) {
+            candidates.push(...pictureDetails.PictureURL);
+        } else if (pictureDetails.PictureURL) {
+            candidates.push(pictureDetails.PictureURL);
+        }
+        if (pictureDetails.GalleryURL) {
+            candidates.push(pictureDetails.GalleryURL);
+        }
+    }
+    if (fallbackGalleryUrl) {
+        candidates.push(fallbackGalleryUrl);
+    }
+    return candidates.find((candidate) => isValidImageUrl(candidate)) || null;
 }
 
 const PROCUREMENT_STATUS_ALIASES = {

@@ -1,6 +1,9 @@
 const supabase = require('../supabaseClient');
+const { logSystemError } = require('./systemErrorService');
 const axios = require('axios');
 const xml2js = require('xml2js'); // xml2jsをインポート
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const soldOutPatterns = ["売り切れ", "在庫なし", "売却済み", "sold out", "売れ切り", ""]; // 売り切れを表すパターン
@@ -8,6 +11,26 @@ const soldOutPatterns = ["売り切れ", "在庫なし", "売却済み", "sold o
 const MAX_RETRIES = 3;
 const CONCURRENCY_LIMIT = 2; // 並行リクエストの最大数
 const RETRY_DELAY = 2000; // 2秒
+
+const syncLogPath = path.resolve(__dirname, '..', '..', '..', 'logs', 'active_listings_sync.log');
+
+const logSyncEvent = (level, message, data = {}) => {
+    try {
+        const dir = path.dirname(syncLogPath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        const payload = {
+            ts: new Date().toISOString(),
+            level,
+            message,
+            ...data,
+        };
+        fs.appendFileSync(syncLogPath, `${JSON.stringify(payload)}\n`, 'utf8');
+    } catch (error) {
+        console.error('Failed to write sync log:', error.message);
+    }
+};
 
 function isSoldOut(stockStatus) {
     return soldOutPatterns.some(pattern => stockStatus.trim() === pattern);
@@ -143,24 +166,52 @@ async function fetchItemDetails(legacyItemId, authToken) {
 
 
 async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 100) {
+    const retryFetch = async (fn, retries = MAX_RETRIES, delay = RETRY_DELAY) => {
+        for (let i = 0; i < retries; i++) {
+            try {
+                return await fn();
+            } catch (error) {
+                console.error(`Retrying (${i + 1}/${retries}) due to error:`, error.message);
+                if (i < retries - 1) await new Promise(resolve => setTimeout(resolve, delay));
+                else throw error;
+            }
+        }
+    };
+
     try {
+        const now = new Date();
+        const from = new Date(now);
+        from.setDate(from.getDate() - 30);
+        const to = new Date(now);
+        to.setDate(to.getDate() + 30);
+
         const requestBody = `<?xml version="1.0" encoding="utf-8"?>
-        <GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+        <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
             <RequesterCredentials>
                 <eBayAuthToken>${authToken}</eBayAuthToken>
             </RequesterCredentials>
-            <ActiveList>
-                <Sort>TimeLeft</Sort>
-                <Pagination>
-                    <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
-                    <PageNumber>${pageNumber}</PageNumber>
-                </Pagination>
-            </ActiveList>
+            <EndTimeFrom>${from.toISOString()}</EndTimeFrom>
+            <EndTimeTo>${to.toISOString()}</EndTimeTo>
+            <Pagination>
+                <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+                <PageNumber>${pageNumber}</PageNumber>
+            </Pagination>
             <DetailLevel>ReturnAll</DetailLevel>
-        </GetMyeBaySellingRequest>`;
+            <OutputSelector>PaginationResult.TotalNumberOfEntries</OutputSelector>
+            <OutputSelector>HasMoreItems</OutputSelector>
+            <OutputSelector>ReturnedItemCountActual</OutputSelector>
+            <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
+            <OutputSelector>ItemArray.Item.Title</OutputSelector>
+            <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
+            <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
+            <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
+            <OutputSelector>ItemArray.Item.StartPrice</OutputSelector>
+            <OutputSelector>ItemArray.Item.SellingStatus.ListingStatus</OutputSelector>
+            <OutputSelector>ItemArray.Item.SellingStatus.CurrentPrice</OutputSelector>
+        </GetSellerListRequest>`;
 
-        const response = await axios.post('https://api.ebay.com/ws/api.dll', 
-            requestBody, 
+        const response = await retryFetch(() => axios.post('https://api.ebay.com/ws/api.dll',
+            requestBody,
             {
                 headers: {
                     'Content-Type': 'text/xml',
@@ -168,26 +219,90 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                     'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID,
                     'X-EBAY-API-APP-NAME': process.env.EBAY_APP_ID,
                     'X-EBAY-API-CERT-NAME': process.env.EBAY_CERT_ID,
-                    'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+                    'X-EBAY-API-CALL-NAME': 'GetSellerList',
                     'X-EBAY-API-SITEID': '0',
                 }
             }
-        );
+        ));
 
-        const parser = new xml2js.Parser();
+        const parser = new xml2js.Parser({ explicitArray: false });
         const result = await parser.parseStringPromise(response.data);
 
-        const activeList = result.GetMyeBaySellingResponse.ActiveList?.ItemArray?.Item;
-        if (!activeList) {
-            throw new Error('ActiveList not found in eBay API response');
+        const responseBody = result.GetSellerListResponse || {};
+        const ack = responseBody.Ack || null;
+        const errors = responseBody.Errors || null;
+        const paginationRoot = responseBody.PaginationResult || {};
+        const totalEntries = parseInt(paginationRoot.TotalNumberOfEntries, 10) || 0;
+        const returnedCount = parseInt(responseBody.ReturnedItemCountActual, 10) || 0;
+        const hasMoreItems = String(responseBody.HasMoreItems).toLowerCase() === 'true';
+        const rawItems = responseBody.ItemArray?.Item;
+        if (!rawItems) {
+            if (returnedCount === 0) {
+                logSyncEvent('info', 'GetSellerList empty result', {
+                    ack,
+                    errors,
+                    pageNumber,
+                    entriesPerPage,
+                    totalEntries,
+                });
+                return { listings: [], totalEntries, hasMoreItems };
+            }
+            console.error('GetSellerList missing ItemArray', {
+                ack,
+                errors,
+            });
+            logSyncEvent('error', 'GetSellerList missing ItemArray', {
+                ack,
+                errors,
+                pageNumber,
+                entriesPerPage,
+            });
+            await logSystemError({
+                error_code: 'EBAY_SELLER_LIST_MISSING',
+                category: 'LISTINGS_SYNC',
+                provider: 'ebay',
+                message: 'GetSellerList missing ItemArray',
+                payload_summary: { pageNumber, entriesPerPage },
+                details: { ack, errors },
+            });
+            throw new Error('ItemArray not found in eBay API response');
         }
-        const itemIds = Array.isArray(activeList) ? activeList.map(item => item.ItemID) : [activeList.ItemID];
-        const totalEntries = parseInt(result.GetMyeBaySellingResponse.ActiveList.PaginationResult.TotalNumberOfEntries, 10);
+        const items = Array.isArray(rawItems) ? rawItems : [rawItems];
+        const listings = items.map((item) => {
+            const currentPrice = item.StartPrice || item.SellingStatus?.CurrentPrice;
+            const primaryImage = Array.isArray(item.PictureDetails?.PictureURL)
+                ? item.PictureDetails.PictureURL[0]
+                : item.PictureDetails?.PictureURL;
+            return {
+                legacyItemId: item.ItemID,
+                status: (item?.SellingStatus?.ListingStatus || 'UNKNOWN').toUpperCase(),
+                category_id: item?.PrimaryCategory?.CategoryID || null,
+                category_name: item?.PrimaryCategory?.CategoryName || null,
+                category_path: null,
+                item_title: item?.Title || null,
+                current_price_value: currentPrice?._ || currentPrice || null,
+                current_price_currency: currentPrice?.$?.currencyID || null,
+                primary_image_url: primaryImage || null,
+                view_item_url: item?.ListingDetails?.ViewItemURL || null,
+            };
+        });
 
-
-        return { itemIds, totalEntries };
+        return { listings, totalEntries, hasMoreItems };
     } catch (error) {
         console.error('Error fetching active listings from eBay:', error.response ? error.response.data : error.message);
+        logSyncEvent('error', 'Error fetching active listings', {
+            pageNumber,
+            entriesPerPage,
+            error: error.response ? error.response.data : error.message,
+        });
+        await logSystemError({
+            error_code: 'EBAY_ACTIVE_LIST_FETCH_FAILED',
+            category: 'LISTINGS_SYNC',
+            provider: 'ebay',
+            message: 'Error fetching active listings from eBay',
+            payload_summary: { pageNumber, entriesPerPage },
+            details: error.response ? error.response.data : error.message,
+        });
         throw new Error('Failed to fetch active listings from eBay');
     }
 }
@@ -209,6 +324,10 @@ async function updateItemsTable(listings, userId, ebayUserId) {
     };
 
     const syncedAt = new Date().toISOString(); // 同期した日時を取得
+
+    let updatedCount = 0;
+    let insertedCount = 0;
+    let failedCount = 0;
 
     for (const listing of listings) {
         const {
@@ -254,6 +373,7 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                         .eq('ebay_item_id', legacyItemId);
                     if (error) throw error;
                 });
+                updatedCount += 1;
             } else {
                 // 一致するデータがなければ、新たにデータを追加
                 await retryFetch(async () => {
@@ -275,11 +395,47 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                         });
                     if (error) throw error;
                 });
+                insertedCount += 1;
             }
         } catch (error) {
             console.error('Error updating item in Supabase:', error.message);
+            await logSystemError({
+                error_code: 'ITEM_SYNC_UPDATE_FAILED',
+                category: 'ITEM_SYNC',
+                provider: 'supabase',
+                message: 'Error updating item in Supabase',
+                user_id: userId,
+                payload_summary: { ebayUserId, legacyItemId },
+                details: error.message,
+            });
+            logSyncEvent('error', 'updateItemsTable item failed', {
+                userId,
+                ebayUserId,
+                legacyItemId,
+                error: error.message,
+            });
+            failedCount += 1;
         }
     }
+
+    console.info('[itemService] updateItemsTable summary', {
+        userId,
+        ebayUserId,
+        total: listings.length,
+        updated: updatedCount,
+        inserted: insertedCount,
+        failed: failedCount,
+    });
+    logSyncEvent('info', 'updateItemsTable summary', {
+        userId,
+        ebayUserId,
+        total: listings.length,
+        updated: updatedCount,
+        inserted: insertedCount,
+        failed: failedCount,
+    });
+
+    return { updatedCount, insertedCount, failedCount };
 }
 
 
@@ -291,6 +447,14 @@ async function syncActiveListingsForUser(userId) {
 
     if (accountsError) {
         console.error('Error fetching accounts from Supabase:', accountsError.message);
+        await logSystemError({
+            error_code: 'ACCOUNT_FETCH_FAILED',
+            category: 'LISTINGS_SYNC',
+            provider: 'supabase',
+            message: 'Error fetching accounts from Supabase',
+            user_id: userId,
+            details: accountsError.message,
+        });
         throw new Error('Failed to fetch accounts from database');
     }
 
@@ -299,81 +463,137 @@ async function syncActiveListingsForUser(userId) {
     }
 
     let totalItems = 0;
+    logSyncEvent('info', 'syncActiveListings start', {
+        userId,
+        accountCount: accounts.length,
+    });
 
     for (const account of accounts) {
         const refreshToken = account.refresh_token;
         const ebayUserId = account.ebay_user_id;
         console.log({ ebayUserId });
+        const statusCounts = {};
+        logSyncEvent('info', 'account sync start', { userId, ebayUserId });
 
         try {
             const authToken = await refreshEbayToken(refreshToken);
             const firstPageData = await fetchActiveListings(authToken, 1, 100);
-            const firstPageItemIds = firstPageData.itemIds;
             const totalEntries = firstPageData.totalEntries;
-            totalItems += firstPageItemIds.length;
+            totalItems += firstPageData.listings.length;
+            (firstPageData.listings || []).forEach((listing) => {
+                const status = listing?.status || 'UNKNOWN';
+                statusCounts[status] = (statusCounts[status] || 0) + 1;
+            });
+            console.info('[itemService] listings page fetched', {
+                ebayUserId,
+                page: 1,
+                pageCount: firstPageData.listings.length,
+                statusCounts,
+                totalEntries,
+            });
+            logSyncEvent('info', 'listings page fetched', {
+                ebayUserId,
+                page: 1,
+                pageCount: firstPageData.listings.length,
+                statusCounts,
+                totalEntries,
+            });
+            const firstPageSync = await updateItemsTable(firstPageData.listings, userId, ebayUserId);
+            logSyncEvent('info', 'listings page synced', {
+                ebayUserId,
+                page: 1,
+                pageCount: firstPageData.listings.length,
+                updated: firstPageSync.updatedCount,
+                inserted: firstPageSync.insertedCount,
+                failed: firstPageSync.failedCount,
+            });
 
-            let listings = [];
-            for (const itemId of firstPageItemIds) {
-                const itemDetails = await fetchItemDetails(itemId, authToken);
-                if (!itemDetails || !itemDetails.PrimaryCategoryID) continue;
-                const currentPrice = itemDetails.StartPrice || itemDetails.SellingStatus?.CurrentPrice;
-                const primaryImage = Array.isArray(itemDetails.PictureDetails?.PictureURL)
-                    ? itemDetails.PictureDetails.PictureURL[0]
-                    : itemDetails.PictureDetails?.PictureURL;
-                listings.push({
-                    legacyItemId: itemId,
-                    category_id: itemDetails.PrimaryCategoryID,
-                    category_name: itemDetails.PrimaryCategoryName,
-                    category_path: itemDetails.PrimaryCategoryIDPath,
-                    item_title: itemDetails.Title,
-                    current_price_value: currentPrice?._,
-                    current_price_currency: currentPrice?.$.currencyID,
-                    primary_image_url: primaryImage || null,
-                    view_item_url: itemDetails?.ListingDetails?.ViewItemURL || null
-                });
-            }
-            await updateItemsTable(listings, userId, ebayUserId);
+            const totalPages = totalEntries ? Math.ceil(totalEntries / 100) : 0;
+            const maxPages = totalPages ? Math.min(totalPages, 100) : 0;
+            let hasMoreItems = firstPageData.hasMoreItems;
 
-            const totalPages = Math.ceil(totalEntries / 100);
-            const maxPages = Math.min(totalPages, 100);
-
-            for (let pageNumber = 2; pageNumber <= maxPages; pageNumber++) {
+            const pageLimit = maxPages || 100;
+            for (let pageNumber = 2; pageNumber <= pageLimit; pageNumber++) {
+                if (maxPages === 0 && !hasMoreItems) break;
                 try {
                     const pageData = await fetchActiveListings(authToken, pageNumber, 100);
-                    const pageItemIds = pageData.itemIds;
-                    totalItems += pageItemIds.length;
-
-                    listings = [];
-                    for (const itemId of pageItemIds) {
-                        const itemDetails = await fetchItemDetails(itemId, authToken);
-                        if (!itemDetails || !itemDetails.PrimaryCategoryID) continue;
-                        const currentPrice = itemDetails.StartPrice || itemDetails.SellingStatus?.CurrentPrice;
-                        const primaryImage = Array.isArray(itemDetails.PictureDetails?.PictureURL)
-                            ? itemDetails.PictureDetails.PictureURL[0]
-                            : itemDetails.PictureDetails?.PictureURL;
-                        listings.push({
-                            legacyItemId: itemId,
-                            category_id: itemDetails.PrimaryCategoryID,
-                            category_name: itemDetails.PrimaryCategoryName,
-                            category_path: itemDetails.PrimaryCategoryIDPath,
-                            item_title: itemDetails.Title,
-                            current_price_value: currentPrice?._,
-                            current_price_currency: currentPrice?.$.currencyID,
-                            primary_image_url: primaryImage || null,
-                            view_item_url: itemDetails?.ListingDetails?.ViewItemURL || null
-                        });
-                    }
-                    await updateItemsTable(listings, userId, ebayUserId);
+                    totalItems += pageData.listings.length;
+                    (pageData.listings || []).forEach((listing) => {
+                        const status = listing?.status || 'UNKNOWN';
+                        statusCounts[status] = (statusCounts[status] || 0) + 1;
+                    });
+                    console.info('[itemService] listings page fetched', {
+                        ebayUserId,
+                        page: pageNumber,
+                        pageCount: pageData.listings.length,
+                        statusCounts,
+                    });
+                    logSyncEvent('info', 'listings page fetched', {
+                        ebayUserId,
+                        page: pageNumber,
+                        pageCount: pageData.listings.length,
+                        statusCounts,
+                    });
+                    const pageSync = await updateItemsTable(pageData.listings, userId, ebayUserId);
+                    logSyncEvent('info', 'listings page synced', {
+                        ebayUserId,
+                        page: pageNumber,
+                        pageCount: pageData.listings.length,
+                        updated: pageSync.updatedCount,
+                        inserted: pageSync.insertedCount,
+                        failed: pageSync.failedCount,
+                    });
+                    hasMoreItems = pageData.hasMoreItems;
                 } catch (pageError) {
                     console.error(`Error fetching page ${pageNumber}:`, pageError.message);
+                    logSyncEvent('error', 'listings page failed', {
+                        ebayUserId,
+                        page: pageNumber,
+                        error: pageError.message,
+                    });
+                    await logSystemError({
+                        error_code: 'EBAY_ACTIVE_LIST_PAGE_FAILED',
+                        category: 'LISTINGS_SYNC',
+                        provider: 'ebay',
+                        message: `Error fetching page ${pageNumber}`,
+                        user_id: userId,
+                        payload_summary: { ebayUserId, page: pageNumber },
+                        details: pageError.message,
+                    });
                 }
             }
+            console.info('[itemService] account listings summary', {
+                ebayUserId,
+                totalEntries,
+                statusCounts,
+            });
+            logSyncEvent('info', 'account listings summary', {
+                userId,
+                ebayUserId,
+                totalEntries,
+                statusCounts,
+            });
         } catch (error) {
             console.error('Error during token refresh or fetching listings:', error.message);
+            logSyncEvent('error', 'account sync failed', {
+                userId,
+                ebayUserId,
+                error: error.message,
+            });
+            await logSystemError({
+                error_code: 'EBAY_SYNC_FAILED',
+                category: 'LISTINGS_SYNC',
+                provider: 'ebay',
+                message: 'Error during token refresh or fetching listings',
+                user_id: userId,
+                payload_summary: { ebayUserId },
+                details: error.message,
+            });
         }
     }
 
     console.log(`Total items fetched: ${totalItems}`);
+    logSyncEvent('info', 'syncActiveListings complete', { userId, totalItems });
     return totalItems;
 }
 
@@ -382,12 +602,12 @@ async function syncActiveListingsForUser(userId) {
 
 async function refreshEbayToken(refreshToken) {
     
-    const queryString = require('query-string')
-    const response = await axios.post('https://api.ebay.com/identity/v1/oauth2/token', queryString.stringify({
+    const body = new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: refreshToken,
-        scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.inventory'
-    }), {
+        scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.inventory',
+    });
+    const response = await axios.post('https://api.ebay.com/identity/v1/oauth2/token', body.toString(), {
         headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
             'Authorization': `Basic ${Buffer.from(`${process.env.EBAY_APP_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64')}`

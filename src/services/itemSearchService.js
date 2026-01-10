@@ -200,6 +200,24 @@ async function searchItems(queryParams) {
 
   // 必要なページングされたデータを取得
   const { data: trafficData } = await trafficQuery.range(numericOffset, numericOffset + numericLimit - 1);
+  const itemIds = (trafficData || [])
+    .map((item) => item.ebay_item_id)
+    .filter((id) => !!id);
+  let imageMap = {};
+  if (itemIds.length > 0) {
+    const { data: itemsData, error: itemsError } = await supabase
+      .from('items')
+      .select('ebay_item_id, primary_image_url')
+      .in('ebay_item_id', itemIds);
+    if (itemsError) {
+      console.error(`Error fetching item images: ${itemsError.message}`);
+    } else {
+      imageMap = (itemsData || []).reduce((acc, item) => {
+        acc[item.ebay_item_id] = item.primary_image_url || null;
+        return acc;
+      }, {});
+    }
+  }
 
   const { data: ordersData, error: ordersError } = await getOrdersForMonth(user_id, report_month, listing_title);
 
@@ -241,8 +259,13 @@ async function searchItems(queryParams) {
 
   console.log('Summary calculated:', summary);
 
+  const itemsWithImages = (trafficData || []).map((item) => ({
+    ...item,
+    primary_image_url: imageMap[item.ebay_item_id] || null,
+  }));
+
   return {
-    items: trafficData,
+    items: itemsWithImages,
     summary,
   };
 }

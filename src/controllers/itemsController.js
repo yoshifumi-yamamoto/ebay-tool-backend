@@ -8,7 +8,9 @@ exports.syncActiveListings = async (req, res) => {
     }
 
     try {
+        console.info('[itemsController] syncActiveListings start', { userId });
         const totalItems = await syncActiveListingsForUser(userId);
+        console.info('[itemsController] syncActiveListings complete', { userId, totalItems });
         res.status(200).json({ message: 'Active listings synchronized successfully', totalItems });
     } catch (error) {
         console.error('Error synchronizing active listings:', error.message);
