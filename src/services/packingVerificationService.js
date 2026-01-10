@@ -33,17 +33,26 @@ exports.fetchPackingVerification = async (filters = {}) => {
       order_no,
       order_date,
       ebay_user_id,
+      status,
       shipping_status,
       shipping_tracking_number,
       shipping_carrier,
+      estimated_shipping_cost,
       shipco_shipping_cost,
       final_shipping_cost,
+      estimated_parcel_weight,
+      estimated_parcel_length,
+      estimated_parcel_width,
+      estimated_parcel_height,
       shipco_parcel_weight,
       shipco_parcel_weight_unit,
       shipco_parcel_length,
       shipco_parcel_width,
       shipco_parcel_height,
-      shipco_parcel_dimension_unit
+      shipco_parcel_dimension_unit,
+      order_line_items (
+        legacy_item_id
+      )
     `, { count: 'exact' })
     .eq('user_id', user_id)
     .eq('shipping_status', 'SHIPPED')
@@ -61,11 +70,61 @@ exports.fetchPackingVerification = async (filters = {}) => {
     throw error;
   }
 
+  const rows = data || [];
+  const legacyItemIds = Array.from(
+    new Set(
+      rows
+        .flatMap((row) => row.order_line_items || [])
+        .map((item) => item?.legacy_item_id)
+        .filter(Boolean)
+    )
+  );
+
+  let itemsMap = {};
+  if (legacyItemIds.length > 0) {
+    const { data: itemsRows, error: itemsError } = await supabase
+      .from('items')
+      .select(`
+        ebay_item_id,
+        estimated_shipping_cost,
+        estimated_parcel_length,
+        estimated_parcel_width,
+        estimated_parcel_height,
+        estimated_parcel_weight
+      `)
+      .in('ebay_item_id', legacyItemIds);
+
+    if (!itemsError && Array.isArray(itemsRows)) {
+      itemsMap = itemsRows.reduce((acc, item) => {
+        acc[item.ebay_item_id] = item;
+        return acc;
+      }, {});
+    }
+  }
+
+  const resolveEstimatedValue = (row, key) => {
+    const existing = toNumberOrNull(row[key]);
+    if (existing !== null) return existing;
+    const lineItems = row.order_line_items || [];
+    for (const item of lineItems) {
+      const legacyId = item?.legacy_item_id;
+      if (!legacyId) continue;
+      const fromItem = toNumberOrNull(itemsMap[legacyId]?.[key]);
+      if (fromItem !== null) return fromItem;
+    }
+    return null;
+  };
+
   return {
-    data: (data || []).map((row) => ({
+    data: rows.map((row) => ({
       ...row,
+      estimated_shipping_cost: resolveEstimatedValue(row, 'estimated_shipping_cost'),
       shipco_shipping_cost: toNumberOrNull(row.shipco_shipping_cost),
       final_shipping_cost: toNumberOrNull(row.final_shipping_cost),
+      estimated_parcel_weight: resolveEstimatedValue(row, 'estimated_parcel_weight'),
+      estimated_parcel_length: resolveEstimatedValue(row, 'estimated_parcel_length'),
+      estimated_parcel_width: resolveEstimatedValue(row, 'estimated_parcel_width'),
+      estimated_parcel_height: resolveEstimatedValue(row, 'estimated_parcel_height'),
       shipco_parcel_weight: toNumberOrNull(row.shipco_parcel_weight),
       shipco_parcel_length: toNumberOrNull(row.shipco_parcel_length),
       shipco_parcel_width: toNumberOrNull(row.shipco_parcel_width),
