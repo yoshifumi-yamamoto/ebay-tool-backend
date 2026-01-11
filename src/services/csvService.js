@@ -309,9 +309,287 @@ async function updateShippingCostsFromCSV(fileBuffer, userId) {
 }
 
 
+function normalizeAmount(raw) {
+    if (raw === undefined || raw === null) {
+        return null;
+    }
+    const str = String(raw).trim();
+    if (!str) {
+        return null;
+    }
+    const normalized = str.replace(/,/g, '').replace(/^\((.*)\)$/, '-$1');
+    const value = Number(normalized);
+    return Number.isFinite(value) ? value : null;
+}
+
+function normalizeDate(raw) {
+    if (!raw) {
+        return null;
+    }
+    const str = String(raw).trim();
+    if (!str) {
+        return null;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        return str;
+    }
+    if (/^\d{8}$/.test(str)) {
+        return `${str.slice(0, 4)}-${str.slice(4, 6)}-${str.slice(6, 8)}`;
+    }
+    const match = str.match(/^(\d{2})-([A-Za-z]{3})-(\d{4})$/);
+    if (match) {
+        const months = {
+            Jan: '01', Feb: '02', Mar: '03', Apr: '04',
+            May: '05', Jun: '06', Jul: '07', Aug: '08',
+            Sep: '09', Oct: '10', Nov: '11', Dec: '12',
+        };
+        const month = months[match[2]];
+        if (month) {
+            return `${match[3]}-${month}-${match[1]}`;
+        }
+    }
+    return str;
+}
+
+function classifyFedexCharge(label) {
+    if (!label) {
+        return 'other';
+    }
+    const lower = String(label).toLowerCase();
+    if (lower.includes('運送料金') || lower.includes('transportation') || lower.includes('freight')) {
+        return 'shipping';
+    }
+    if (lower.includes('duty') || lower.includes('税') || lower.includes('関税')) {
+        return 'customs';
+    }
+    if (lower.includes('手数料') || lower.includes('fee') || lower.includes('surcharge')) {
+        return 'fee';
+    }
+    return 'other';
+}
+
+function classifyDhlCharge(label, taxCode) {
+    if (!label && !taxCode) {
+        return 'other';
+    }
+    const lower = String(label || '').toLowerCase();
+    const taxLower = String(taxCode || '').toLowerCase();
+    if (taxLower.includes('vat') || taxLower.includes('duty') || lower.includes('duty') || lower.includes('tax')) {
+        return 'customs';
+    }
+    if (lower.includes('invoice fee') || lower.includes('other charges') || lower.includes('fee') || lower.includes('surcharge')) {
+        return 'fee';
+    }
+    if (lower.includes('weight') || lower.includes('discount')) {
+        return 'shipping';
+    }
+    return 'other';
+}
+
+async function upsertCarrierInvoice(payload) {
+    const { data, error } = await supabase
+        .from('carrier_invoices')
+        .upsert(payload, { onConflict: 'carrier,invoice_number' })
+        .select('id')
+        .maybeSingle();
+    if (error) {
+        throw new Error(`carrier_invoices upsert failed: ${error.message}`);
+    }
+    return data?.id;
+}
+
+async function upsertCarrierShipment(payload) {
+    const { data, error } = await supabase
+        .from('carrier_shipments')
+        .upsert(payload, { onConflict: 'invoice_id,awb_number' })
+        .select('id')
+        .maybeSingle();
+    if (error) {
+        throw new Error(`carrier_shipments upsert failed: ${error.message}`);
+    }
+    return data?.id;
+}
+
+async function replaceCarrierCharges(shipmentId, charges) {
+    const { error: deleteError } = await supabase
+        .from('carrier_charges')
+        .delete()
+        .eq('shipment_id', shipmentId);
+    if (deleteError) {
+        throw new Error(`carrier_charges delete failed: ${deleteError.message}`);
+    }
+    if (!charges.length) {
+        return;
+    }
+    const { error: insertError } = await supabase
+        .from('carrier_charges')
+        .insert(charges);
+    if (insertError) {
+        throw new Error(`carrier_charges insert failed: ${insertError.message}`);
+    }
+}
+
+async function processFedexRows(rows, sourceFileName) {
+    let processed = 0;
+    for (const row of rows) {
+        const invoiceNumber = row['FedEx請求書番号'];
+        const awb = row['航空貨物運送状番号'];
+        if (!invoiceNumber || !awb) {
+            continue;
+        }
+        const invoiceId = await upsertCarrierInvoice({
+            carrier: 'FEDEX',
+            invoice_number: invoiceNumber,
+            invoice_date: normalizeDate(row['請求書発行日']),
+            currency: row['請求通貨'] || null,
+            billing_account: row['請求先アカウント・ナンバー'] || null,
+            source_file_name: sourceFileName,
+        });
+        const shipmentId = await upsertCarrierShipment({
+            invoice_id: invoiceId,
+            awb_number: awb,
+            shipment_date: normalizeDate(row['出荷日'] || row['出荷日（書式設定済）']),
+            reference_1: row['荷送人参照1'] || null,
+            shipment_total: normalizeAmount(row['航空貨物運送状の総額']),
+        });
+
+        const labelMap = {};
+        const amountMap = {};
+        Object.entries(row).forEach(([key, value]) => {
+            const labelMatch = key.match(/^航空貨物運送状の請求ラベル__(\d+)$/);
+            if (labelMatch) {
+                labelMap[Number(labelMatch[1])] = value;
+            }
+            const amountMatch = key.match(/^航空貨物運送状の請求額__(\d+)$/);
+            if (amountMatch) {
+                amountMap[Number(amountMatch[1])] = value;
+            }
+        });
+        const indices = Array.from(new Set([...Object.keys(labelMap), ...Object.keys(amountMap)]))
+            .map(Number)
+            .sort((a, b) => a - b);
+        const charges = [];
+        indices.forEach((index, idx) => {
+            const label = labelMap[index];
+            const amount = normalizeAmount(amountMap[index]);
+            if (!label || amount === null || amount === 0) {
+                return;
+            }
+            charges.push({
+                shipment_id: shipmentId,
+                charge_group: classifyFedexCharge(label),
+                charge_name_raw: label,
+                amount,
+                invoice_category: row['請求書の種類'] || null,
+                line_no: idx + 1,
+            });
+        });
+        await replaceCarrierCharges(shipmentId, charges);
+        processed += 1;
+    }
+    return { processed };
+}
+
+async function processDhlRows(rows, sourceFileName) {
+    let processed = 0;
+    for (const row of rows) {
+        const invoiceNumber = row['Invoice Number'];
+        const awb = row['Shipment Number'];
+        if (!invoiceNumber || !awb) {
+            continue;
+        }
+        const invoiceId = await upsertCarrierInvoice({
+            carrier: 'DHL',
+            invoice_number: invoiceNumber,
+            invoice_date: normalizeDate(row['Invoice Date']),
+            currency: row['Currency'] || null,
+            billing_account: row['Billing Account'] || null,
+            source_file_name: sourceFileName,
+        });
+        const shipmentId = await upsertCarrierShipment({
+            invoice_id: invoiceId,
+            awb_number: awb,
+            shipment_date: normalizeDate(row['Shipment Date']),
+            reference_1: row['Shipment Reference 1'] || null,
+            shipment_total: normalizeAmount(row['Total amount (excl. VAT)']),
+        });
+
+        const charges = [];
+        const pushCharge = (name, amount, lineNo, code = null, taxCode = null) => {
+            const parsed = normalizeAmount(amount);
+            if (parsed === null || parsed === 0) {
+                return;
+            }
+            charges.push({
+                shipment_id: shipmentId,
+                charge_group: classifyDhlCharge(name, taxCode),
+                charge_name_raw: name,
+                amount: parsed,
+                charge_code: code,
+                line_no: lineNo,
+            });
+        };
+
+        pushCharge('Weight Charge', row['Weight Charge'], 1, null, row['Tax Code']);
+        pushCharge('Invoice Fee', row['Invoice Fee'], 2, null, row['Tax Code']);
+        pushCharge(row['Other Charges 1'] || 'Other Charges 1', row['Other Charges 1 Amount'], 3);
+        pushCharge(row['Other Charges 2'] || 'Other Charges 2', row['Other Charges 2 Amount'], 4);
+        pushCharge(row['Discount 1'] || 'Discount 1', row['Discount 1 Amount'], 5);
+        pushCharge(row['Discount 2'] || 'Discount 2', row['Discount 2 Amount'], 6);
+        pushCharge(row['Discount 3'] || 'Discount 3', row['Discount 3 Amount'], 7);
+
+        for (let i = 1; i <= 9; i += 1) {
+            const code = row[`XC${i} Code`];
+            const name = row[`XC${i} Name`] || `XC${i}`;
+            const amount = row[`XC${i} Charge`];
+            pushCharge(name, amount, 10 + i, code, row[`XC${i} Tax Code`]);
+        }
+
+        await replaceCarrierCharges(shipmentId, charges);
+        processed += 1;
+    }
+    return { processed };
+}
+
+async function updateCarrierInvoicesFromCSV(fileBuffer, sourceFileName) {
+    return await new Promise((resolve, reject) => {
+        const rows = [];
+        const rawHeaders = [];
+        fileBuffer
+            .pipe(csv({
+                mapHeaders: ({ header, index }) => {
+                    const trimmed = header.trim();
+                    rawHeaders[index] = trimmed;
+                    if (trimmed === '航空貨物運送状の請求ラベル' || trimmed === '航空貨物運送状の請求額') {
+                        return `${trimmed}__${index}`;
+                    }
+                    return trimmed;
+                }
+            }))
+            .on('data', (row) => rows.push(row))
+            .on('end', async () => {
+                try {
+                    const isFedex = rawHeaders.includes('FedEx請求書番号');
+                    const isDhl = rawHeaders.includes('Invoice Number');
+                    if (!isFedex && !isDhl) {
+                        throw new Error('Unknown carrier CSV format');
+                    }
+                    const result = isFedex
+                        ? await processFedexRows(rows, sourceFileName)
+                        : await processDhlRows(rows, sourceFileName);
+                    resolve(result);
+                } catch (error) {
+                    reject(error);
+                }
+            })
+            .on('error', (error) => reject(error));
+    });
+}
+
 module.exports = {
     updateCategoriesFromCSV,
     updateTrafficFromCSV,
     updateActiveListingsCSV,
-    updateShippingCostsFromCSV
+    updateShippingCostsFromCSV,
+    updateCarrierInvoicesFromCSV
 };

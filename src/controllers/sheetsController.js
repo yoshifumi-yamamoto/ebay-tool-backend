@@ -1,4 +1,5 @@
 const { readFromSheet, saveItems } = require('../services/sheetsService');
+const { logSystemError } = require('../services/systemErrorService');
 const supabase = require('../supabaseClient');
 const { parse, format, isValid } = require('date-fns');
 
@@ -20,40 +21,112 @@ async function syncSheetToSupabase(req, res) {
             const { ebay_user_id, spreadsheet_id } = account;
 
             // ヘッダー行を読み取る
-            const headers = await readFromSheet(spreadsheet_id, 'A2:Z2');
-            const headerMap = {};
-            headers[0].forEach((header, index) => {
-                headerMap[header.trim()] = index;
-            });
+            const normalizeHeader = (value) => String(value || '')
+                .trim()
+                .replace(/\s+/g, '')
+                .replace(/（/g, '(')
+                .replace(/）/g, ')');
+            const buildHeaderMap = (headersRow) => {
+                const map = {};
+                (headersRow || []).forEach((header, index) => {
+                    map[normalizeHeader(header)] = index;
+                });
+                return map;
+            };
+            const headerScan = await readFromSheet(spreadsheet_id, 'A1:AZ5');
+            let headerRowIndex = null;
+            let headerMap = {};
+            if (headerScan && headerScan.length) {
+                for (let i = 0; i < headerScan.length; i += 1) {
+                    const map = buildHeaderMap(headerScan[i]);
+                    if (Object.keys(map).length === 0) {
+                        continue;
+                    }
+                    if (map[normalizeHeader('商品タイトル')]) {
+                        headerRowIndex = i;
+                        headerMap = map;
+                        break;
+                    }
+                }
+            }
+            if (headerRowIndex === null) {
+                const headers = await readFromSheet(spreadsheet_id, 'A2:AZ2');
+                headerMap = buildHeaderMap(headers?.[0]);
+                headerRowIndex = 1;
+            }
 
-            // 必要な列を確認
-            const requiredHeaders = ['商品タイトル', '仕入れURL', '仕入価格', 'eBay URL', '目安送料', '縦 (cm)', '横(cm)', '高さ(cm)', '発送重量(g)', 'リサーチ担当', '出品担当', '出品作業日', 'リサーチ作業日'];
-            for (let header of requiredHeaders) {
-                if (!headerMap.hasOwnProperty(header)) {
-                    throw new Error(`Missing required header: ${header}`);
+            const headerAliases = {
+                title: ['商品タイトル'],
+                stocking_url: ['仕入れURL', '仕入URL'],
+                cost_price: ['仕入価格', '仕入れ価格'],
+                ebay_url: ['eBayURL', 'ebayURL', 'eBay URL'],
+                shipping_cost: ['目安送料'],
+                estimated_length: ['縦(cm)', '縦 (cm)'],
+                estimated_width: ['横(cm)', '横 (cm)'],
+                estimated_height: ['高さ(cm)', '高さ (cm)'],
+                estimated_weight: ['発送重量(g)', '発送重量 (g)', '発送重量（g）'],
+                researcher: ['リサーチ担当'],
+                exhibitor: ['出品担当'],
+                exhibit_date: ['出品作業日'],
+                research_date: ['リサーチ作業日'],
+            };
+            const getHeaderIndex = (aliases) => {
+                for (const alias of aliases) {
+                    const normalized = normalizeHeader(alias);
+                    if (headerMap.hasOwnProperty(normalized)) {
+                        return headerMap[normalized];
+                    }
+                }
+                return null;
+            };
+
+            const headerIndexes = {};
+            for (const [key, aliases] of Object.entries(headerAliases)) {
+                const index = getHeaderIndex(aliases);
+                if (index === null) {
+                    const headerRowFallback = await readFromSheet(spreadsheet_id, 'A1:AZ1');
+                    headerMap = buildHeaderMap(headerRowFallback?.[0]);
+                    const fallbackIndex = getHeaderIndex(aliases);
+                    if (fallbackIndex === null) {
+                        const message = `Missing required header: ${aliases[0]}`;
+                        await logSystemError({
+                            error_code: 'SHEET_HEADER_MISSING',
+                            category: 'SHEET_SYNC',
+                            provider: 'google_sheets',
+                            message,
+                            user_id: userId,
+                            payload_summary: { ebay_user_id, spreadsheet_id },
+                            details: { missingHeader: aliases[0] },
+                        });
+                        throw new Error(message);
+                    }
+                    headerIndexes[key] = fallbackIndex;
+                } else {
+                    headerIndexes[key] = index;
                 }
             }
 
             // データ行を読み取る
-            const rows = await readFromSheet(spreadsheet_id, `A3:Z`);
+            const dataStartRow = headerRowIndex + 2;
+            const rows = await readFromSheet(spreadsheet_id, `A${dataStartRow}:AZ`);
 
             // 空行をフィルタリング
             const itemsFromSheet = rows
-                .filter(row => row && row.length >= requiredHeaders.length && row[headerMap['eBay URL']]) // 空行や不完全な行、eBay URLが空白の行を除外
+                .filter(row => row && row.length >= Object.keys(headerIndexes).length && row[headerIndexes.ebay_url]) // 空行や不完全な行、eBay URLが空白の行を除外
                 .map(row => {
-                    const title = row[headerMap['商品タイトル']] || '';
-                    const stocking_url = row[headerMap['仕入れURL']] || '';
-                    const cost_price = row[headerMap['仕入価格']] || '';
-                    const ebay_url = row[headerMap['eBay URL']] || '';
-                    const shipping_cost = row[headerMap['目安送料']] || '';
-                    const estimated_length = row[headerMap['縦 (cm)']] || '';
-                    const estimated_width = row[headerMap['横(cm)']] || '';
-                    const estimated_height = row[headerMap['高さ(cm)']] || '';
-                    const estimated_weight = row[headerMap['発送重量(g)']] || '';
-                    const researcher = row[headerMap['リサーチ担当']] || '';
-                    const exhibitor = row[headerMap['出品担当']] || '';
-                    const exhibit_date = row[headerMap['出品作業日']];
-                    const research_date = row[headerMap['リサーチ作業日']];
+                    const title = row[headerIndexes.title] || '';
+                    const stocking_url = row[headerIndexes.stocking_url] || '';
+                    const cost_price = row[headerIndexes.cost_price] || '';
+                    const ebay_url = row[headerIndexes.ebay_url] || '';
+                    const shipping_cost = row[headerIndexes.shipping_cost] || '';
+                    const estimated_length = row[headerIndexes.estimated_length] || '';
+                    const estimated_width = row[headerIndexes.estimated_width] || '';
+                    const estimated_height = row[headerIndexes.estimated_height] || '';
+                    const estimated_weight = row[headerIndexes.estimated_weight] || '';
+                    const researcher = row[headerIndexes.researcher] || '';
+                    const exhibitor = row[headerIndexes.exhibitor] || '';
+                    const exhibit_date = row[headerIndexes.exhibit_date];
+                    const research_date = row[headerIndexes.research_date];
                     const formattedShippingPrice = parseInt(shipping_cost.replace(/[^0-9]/g, '')) || 0; // ¥や,を除去
                     const formattedCostPrice = parseInt(cost_price.replace(/[^0-9]/g, '')) || 0; // ¥や,を除去
                     const formattedLength = parseInt(String(estimated_length).replace(/[^0-9]/g, '')) || 0;
@@ -86,6 +159,14 @@ async function syncSheetToSupabase(req, res) {
         res.status(200).send('Items successfully saved to Supabase');
     } catch (error) {
         console.error('Error syncing sheet to Supabase:', error.message);
+        await logSystemError({
+            error_code: 'SHEET_SYNC_FAILED',
+            category: 'SHEET_SYNC',
+            provider: 'google_sheets',
+            message: error.message,
+            user_id: userId,
+            details: error.stack || error.message,
+        });
         res.status(500).send(`Error syncing sheet to Supabase: ${error.message}`);
     }
 }

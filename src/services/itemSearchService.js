@@ -280,7 +280,7 @@ async function searchItemsSimple(queryParams) {
   const numericLimit = Number.isFinite(Number(limit)) ? Number(limit) : 200;
   let query = supabase
     .from('items')
-    .select('ebay_item_id, title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency')
+    .select('ebay_item_id, title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency, primary_image_url')
     .eq('user_id', user_id)
     .order('updated_at', { ascending: false })
     .limit(numericLimit);

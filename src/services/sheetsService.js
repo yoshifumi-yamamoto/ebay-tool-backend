@@ -37,9 +37,26 @@ function formatDateString(dateString) {
         return null; // 空の場合はnullを返す
     }
 
+    const trimmed = String(dateString).trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    // Handle M/D or M/DD (assume current year)
+    if (/^\d{1,2}\/\d{1,2}$/.test(trimmed)) {
+        const [month, day] = trimmed.split('/').map((part) => parseInt(part, 10));
+        if (!isNaN(month) && !isNaN(day)) {
+            const now = new Date();
+            const year = now.getFullYear();
+            const mm = String(month).padStart(2, '0');
+            const dd = String(day).padStart(2, '0');
+            return `${year}-${mm}-${dd}`;
+        }
+    }
+
     // Check if the dateString is in 'YYYY/MM/DD' format
-    if (/^\d{4}\/\d{2}\/\d{2}$/.test(dateString)) {
-        const parts = dateString.split('/');
+    if (/^\d{4}\/\d{2}\/\d{2}$/.test(trimmed)) {
+        const parts = trimmed.split('/');
         if (parts.length === 3) {
             const [year, month, day] = parts;
             if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
@@ -49,11 +66,11 @@ function formatDateString(dateString) {
     }
 
     // Check if the dateString is already in 'YYYY-MM-DD' format
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
-        return dateString;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        return trimmed;
     }
 
-    console.error(`Invalid date format: ${dateString}`);
+    console.error(`Invalid date format: ${trimmed}`);
     return null; // 無効な日付フォーマットの場合もnullを返す
 }
 
@@ -71,30 +88,43 @@ async function saveItems(items, userId) {
                 };
             });
 
-        const batchSize = 1000; // バッチサイズを設定
+        const batchSize = 20; // バッチサイズを設定
+        const batchDelayMs = 200;
+        const retryLimit = 3;
+        const retryDelayMs = 500;
         for (let i = 0; i < uniqueItems.length; i += batchSize) {
             const batch = uniqueItems.slice(i, i + batchSize);
-            const { data, error } = await supabase
-                .from('items')
-                .upsert(batch, {
-                    onConflict: ['ebay_item_id', 'user_id'], // user_idも衝突対象に追加
-                    updateColumns: [
-                        'title', 
-                        'stocking_url', 
-                        'cost_price',
-                        'estimated_shipping_cost',
-                        'estimated_parcel_length',
-                        'estimated_parcel_width',
-                        'estimated_parcel_height',
-                        'estimated_parcel_weight',
-                        'researcher', 
-                        'exhibitor', 
-                        'exhibit_date', 
-                        'research_date', 
-                        'ebay_user_id',
-                        'updated_at'  // updated_atを追加
-                    ]
-                });
+            let error = null;
+            for (let attempt = 1; attempt <= retryLimit; attempt += 1) {
+                const response = await supabase
+                    .from('items')
+                    .upsert(batch, {
+                        onConflict: ['ebay_item_id', 'user_id'], // user_idも衝突対象に追加
+                        updateColumns: [
+                            'title',
+                            'stocking_url',
+                            'cost_price',
+                            'estimated_shipping_cost',
+                            'estimated_parcel_length',
+                            'estimated_parcel_width',
+                            'estimated_parcel_height',
+                            'estimated_parcel_weight',
+                            'researcher',
+                            'exhibitor',
+                            'exhibit_date',
+                            'research_date',
+                            'ebay_user_id',
+                            'updated_at'
+                        ]
+                    });
+                error = response?.error || null;
+                if (!error) {
+                    break;
+                }
+                if (attempt < retryLimit) {
+                    await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                }
+            }
 
             if (error) {
                 // エラー発生時、バッチ内の個々のアイテムで `upsert` を試みる
@@ -102,27 +132,37 @@ async function saveItems(items, userId) {
                 // console.log(batch);
                 for (const item of batch) {
                     try {
-                        const { error: itemError } = await supabase
-                            .from('items')
-                            .upsert(item, {
-                                onConflict: ['ebay_item_id', 'user_id'],
-                                updateColumns: [
-                                    'title',
-                                    'stocking_url',
-                                    'cost_price',
-                                    'estimated_shipping_cost',
-                                    'estimated_parcel_length',
-                                    'estimated_parcel_width',
-                                    'estimated_parcel_height',
-                                    'estimated_parcel_weight',
-                                    'researcher',
-                                    'exhibitor',
-                                    'exhibit_date',
-                                    'research_date',
-                                    'ebay_user_id',
-                                    'updated_at'
-                                ]
-                            });
+                        let itemError = null;
+                        for (let attempt = 1; attempt <= retryLimit; attempt += 1) {
+                            const { error: attemptError } = await supabase
+                                .from('items')
+                                .upsert(item, {
+                                    onConflict: ['ebay_item_id', 'user_id'],
+                                    updateColumns: [
+                                        'title',
+                                        'stocking_url',
+                                        'cost_price',
+                                        'estimated_shipping_cost',
+                                        'estimated_parcel_length',
+                                        'estimated_parcel_width',
+                                        'estimated_parcel_height',
+                                        'estimated_parcel_weight',
+                                        'researcher',
+                                        'exhibitor',
+                                        'exhibit_date',
+                                        'research_date',
+                                        'ebay_user_id',
+                                        'updated_at'
+                                    ]
+                                });
+                            itemError = attemptError || null;
+                            if (!itemError) {
+                                break;
+                            }
+                            if (attempt < retryLimit) {
+                                await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                            }
+                        }
 
                         if (itemError) {
                             console.log("Error upserting item:", item);
@@ -153,6 +193,7 @@ async function saveItems(items, userId) {
                 }
                 throw error;
             }
+            await new Promise(resolve => setTimeout(resolve, batchDelayMs));
         }
         return true;
     } catch (error) {

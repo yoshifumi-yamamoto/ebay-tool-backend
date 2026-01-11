@@ -268,22 +268,28 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
             throw new Error('ItemArray not found in eBay API response');
         }
         const items = Array.isArray(rawItems) ? rawItems : [rawItems];
+        const getTextValue = (value) => {
+            if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, '_')) {
+                return value._;
+            }
+            return value ?? null;
+        };
         const listings = items.map((item) => {
             const currentPrice = item.StartPrice || item.SellingStatus?.CurrentPrice;
             const primaryImage = Array.isArray(item.PictureDetails?.PictureURL)
                 ? item.PictureDetails.PictureURL[0]
                 : item.PictureDetails?.PictureURL;
             return {
-                legacyItemId: item.ItemID,
+                legacyItemId: getTextValue(item.ItemID),
                 status: (item?.SellingStatus?.ListingStatus || 'UNKNOWN').toUpperCase(),
-                category_id: item?.PrimaryCategory?.CategoryID || null,
-                category_name: item?.PrimaryCategory?.CategoryName || null,
+                category_id: getTextValue(item?.PrimaryCategory?.CategoryID),
+                category_name: getTextValue(item?.PrimaryCategory?.CategoryName),
                 category_path: null,
-                item_title: item?.Title || null,
-                current_price_value: currentPrice?._ || currentPrice || null,
+                item_title: getTextValue(item?.Title),
+                current_price_value: getTextValue(currentPrice),
                 current_price_currency: currentPrice?.$?.currencyID || null,
                 primary_image_url: primaryImage || null,
-                view_item_url: item?.ListingDetails?.ViewItemURL || null,
+                view_item_url: getTextValue(item?.ListingDetails?.ViewItemURL) || getTextValue(item?.ListingDetails?.ViewItemURLForNaturalSearch),
             };
         });
 
