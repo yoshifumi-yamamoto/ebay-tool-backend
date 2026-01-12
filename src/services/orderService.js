@@ -161,10 +161,19 @@ const normalizeCancelStatus = (value) => {
 const isFinalCancelStatus = (status) => {
     const normalized = normalizeCancelStatus(status);
     if (!normalized) return false;
-    if (normalized.includes('PENDING') || normalized.includes('REQUEST') || normalized.includes('INIT')) {
+    if (
+        normalized.includes('PENDING') ||
+        normalized.includes('REQUEST') ||
+        normalized.includes('INIT') ||
+        normalized.includes('OPEN') ||
+        normalized.includes('WAIT')
+    ) {
         return false;
     }
-    return normalized.includes('CANCEL') || normalized.includes('CANCELLED') || normalized.includes('CANCELED') || normalized.includes('CLOSED');
+    if (normalized.includes('CANCEL_CLOSED') || normalized.includes('CLOSED')) {
+        return true;
+    }
+    return normalized.includes('CANCELLED') || normalized.includes('CANCELED');
 };
 
 const extractCancellationStatus = (cancellation = {}) => {
@@ -173,6 +182,7 @@ const extractCancellationStatus = (cancellation = {}) => {
         cancellation.state ||
         cancellation.cancel_status ||
         cancellation.cancelStatus ||
+        cancellation.cancelState ||
         cancellation.request_status ||
         cancellation.requestStatus ||
         cancellation.decision ||

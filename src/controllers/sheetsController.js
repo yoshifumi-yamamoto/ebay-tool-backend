@@ -33,7 +33,9 @@ async function syncSheetToSupabase(req, res) {
                 });
                 return map;
             };
-            const headerScan = await readFromSheet(spreadsheet_id, 'A1:AZ5');
+            const sheetName = '出品 年月';
+            const sheetRange = (range) => `'${sheetName}'!${range}`;
+            const headerScan = await readFromSheet(spreadsheet_id, sheetRange('A1:AZ20'));
             let headerRowIndex = null;
             let headerMap = {};
             if (headerScan && headerScan.length) {
@@ -42,7 +44,7 @@ async function syncSheetToSupabase(req, res) {
                     if (Object.keys(map).length === 0) {
                         continue;
                     }
-                    if (map[normalizeHeader('商品タイトル')]) {
+                    if (map[normalizeHeader('商品タイトル')] !== undefined) {
                         headerRowIndex = i;
                         headerMap = map;
                         break;
@@ -50,16 +52,31 @@ async function syncSheetToSupabase(req, res) {
                 }
             }
             if (headerRowIndex === null) {
-                const headers = await readFromSheet(spreadsheet_id, 'A2:AZ2');
-                headerMap = buildHeaderMap(headers?.[0]);
-                headerRowIndex = 1;
+                const message = `Header row not found in ${sheetName} A1:AZ20`;
+                await logSystemError({
+                    error_code: 'SHEET_HEADER_NOT_FOUND',
+                    category: 'SHEET_SYNC',
+                    provider: 'google_sheets',
+                    message,
+                    user_id: userId,
+                    payload_summary: { ebay_user_id, spreadsheet_id },
+                    details: { scannedRows: headerScan?.length || 0 },
+                });
+                throw new Error(message);
             }
+            console.info('[sheets] header scan result', {
+                ebay_user_id,
+                spreadsheet_id,
+                headerRowIndex,
+                headerKeys: Object.keys(headerMap || {}),
+            });
 
             const headerAliases = {
                 title: ['商品タイトル'],
                 stocking_url: ['仕入れURL', '仕入URL'],
                 cost_price: ['仕入価格', '仕入れ価格'],
                 ebay_url: ['eBayURL', 'ebayURL', 'eBay URL'],
+                ebay_item_id: ['eBayItemID', 'eBay Item ID', 'eBayItemId', 'eBay ItemID'],
                 shipping_cost: ['目安送料'],
                 estimated_length: ['縦(cm)', '縦 (cm)'],
                 estimated_width: ['横(cm)', '横 (cm)'],
@@ -106,18 +123,93 @@ async function syncSheetToSupabase(req, res) {
                 }
             }
 
+            const { data: activeItems, error: activeItemsError } = await supabase
+                .from('items')
+                .select('ebay_item_id')
+                .eq('user_id', userId)
+                .eq('ebay_user_id', ebay_user_id)
+                .eq('listing_status', 'ACTIVE');
+            if (activeItemsError) {
+                throw new Error(`Failed to fetch active items: ${activeItemsError.message}`);
+            }
+            const activeItemIdSet = new Set(
+                (activeItems || []).map((item) => item.ebay_item_id).filter(Boolean)
+            );
+
             // データ行を読み取る
             const dataStartRow = headerRowIndex + 2;
-            const rows = await readFromSheet(spreadsheet_id, `A${dataStartRow}:AZ`);
+            const rows = await readFromSheet(spreadsheet_id, sheetRange(`A${dataStartRow}:AZ`));
 
             // 空行をフィルタリング
-            const itemsFromSheet = rows
-                .filter(row => row && row.length >= Object.keys(headerIndexes).length && row[headerIndexes.ebay_url]) // 空行や不完全な行、eBay URLが空白の行を除外
+            const rowsSafe = Array.isArray(rows) ? rows : [];
+            let skippedMissingEbayId = 0;
+            let skippedNotActiveOrRecent = 0;
+            let skippedShortRow = 0;
+            const now = new Date();
+            const recentCutoff = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+            const recentRowThreshold = 1000;
+            const recentRowIndex = Math.max(rowsSafe.length - recentRowThreshold, 0);
+            const parseSheetDate = (value) => {
+                if (!value) return null;
+                const trimmed = String(value).trim();
+                if (!trimmed) return null;
+                if (/^\d{1,2}\/\d{1,2}$/.test(trimmed)) {
+                    const [month, day] = trimmed.split('/').map((part) => parseInt(part, 10));
+                    if (!isNaN(month) && !isNaN(day)) {
+                        const year = now.getFullYear();
+                        const mm = String(month).padStart(2, '0');
+                        const dd = String(day).padStart(2, '0');
+                        return new Date(`${year}-${mm}-${dd}`);
+                    }
+                }
+                if (/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(trimmed)) {
+                    const [year, month, day] = trimmed.split('/').map((part) => parseInt(part, 10));
+                    if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+                        const mm = String(month).padStart(2, '0');
+                        const dd = String(day).padStart(2, '0');
+                        return new Date(`${year}-${mm}-${dd}`);
+                    }
+                }
+                if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+                    return new Date(trimmed);
+                }
+                return null;
+            };
+            const itemsFromSheet = rowsSafe
+                .filter((row, index) => {
+                    if (!row || row.length < Object.keys(headerIndexes).length) {
+                        skippedShortRow += 1;
+                        return false;
+                    }
+                    const ebayItemIdCell = headerIndexes.ebay_item_id != null
+                        ? row[headerIndexes.ebay_item_id]
+                        : '';
+                    const ebayUrlCell = row[headerIndexes.ebay_url] || '';
+                    const ebayItemIdFromUrl = ebayUrlCell.match(/\/(\d+)(?:[\/?]|$)/);
+                    const ebayItemId = String(ebayItemIdCell || ebayItemIdFromUrl?.[1] || '').trim();
+                    if (!ebayItemId) {
+                        skippedMissingEbayId += 1;
+                        return false;
+                    }
+                    const isActive = activeItemIdSet.has(ebayItemId);
+                    const isRecentRow = index >= recentRowIndex;
+                    const exhibitDateValue = row[headerIndexes.exhibit_date];
+                    const exhibitDate = parseSheetDate(exhibitDateValue);
+                    const isRecentExhibit = exhibitDate ? exhibitDate >= recentCutoff : false;
+                    if (!isActive && !isRecentRow && !isRecentExhibit) {
+                        skippedNotActiveOrRecent += 1;
+                        return false;
+                    }
+                    return true;
+                }) // 空行や不完全な行、eBay URLが空白の行を除外
                 .map(row => {
                     const title = row[headerIndexes.title] || '';
                     const stocking_url = row[headerIndexes.stocking_url] || '';
                     const cost_price = row[headerIndexes.cost_price] || '';
                     const ebay_url = row[headerIndexes.ebay_url] || '';
+                    const ebay_item_id_cell = headerIndexes.ebay_item_id != null
+                        ? row[headerIndexes.ebay_item_id]
+                        : '';
                     const shipping_cost = row[headerIndexes.shipping_cost] || '';
                     const estimated_length = row[headerIndexes.estimated_length] || '';
                     const estimated_width = row[headerIndexes.estimated_width] || '';
@@ -134,7 +226,7 @@ async function syncSheetToSupabase(req, res) {
                     const formattedHeight = parseInt(String(estimated_height).replace(/[^0-9]/g, '')) || 0;
                     const formattedWeight = parseInt(String(estimated_weight).replace(/[^0-9]/g, '')) || 0;
                     const ebay_item_id_match = ebay_url.match(/\/(\d+)(?:[\/?]|$)/);
-                    const ebay_item_id = ebay_item_id_match ? ebay_item_id_match[1] : '';
+                    const ebay_item_id = String(ebay_item_id_cell || ebay_item_id_match?.[1] || '').trim();
 
                     return {
                         title,
@@ -153,6 +245,17 @@ async function syncSheetToSupabase(req, res) {
                         ebay_user_id
                     };
                 });
+
+            console.info('[sheets] sync summary', {
+                ebay_user_id,
+                spreadsheet_id,
+                rowsRead: rowsSafe.length,
+                rowsKept: itemsFromSheet.length,
+                skippedMissingEbayId,
+                skippedShortRow,
+                skippedNotActiveOrRecent,
+                activeItemCount: activeItemIdSet.size,
+            });
 
             await saveItems(itemsFromSheet, userId);
         }
