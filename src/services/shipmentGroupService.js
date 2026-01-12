@@ -191,6 +191,27 @@ async function createShipmentGroup(userId, orderNos, primaryOrderNo) {
     if (!Array.isArray(orderNos) || orderNos.length === 0) {
         throw new Error('orderNos is required');
     }
+    if (orderNos.length < 2) {
+        throw new Error('Shipment group requires at least two orders');
+    }
+
+    const { data: orders, error: ordersError } = await supabase
+        .from('orders')
+        .select('order_no, ebay_buyer_id, user_id')
+        .eq('user_id', userId)
+        .in('order_no', orderNos);
+    if (ordersError) {
+        throw new Error(`Failed to validate orders: ${ordersError.message}`);
+    }
+    const foundOrderNos = new Set((orders || []).map((order) => order.order_no));
+    const missingOrderNos = orderNos.filter((orderNo) => !foundOrderNos.has(orderNo));
+    if (missingOrderNos.length > 0) {
+        throw new Error(`Orders not found: ${missingOrderNos.join(',')}`);
+    }
+    const buyerIds = new Set((orders || []).map((order) => normalizeString(order.ebay_buyer_id)).filter(Boolean));
+    if (buyerIds.size !== 1) {
+        throw new Error('Shipment group must contain orders from the same buyer');
+    }
     const primary = primaryOrderNo || orderNos[0];
 
     const { data: group, error: groupError } = await supabase
