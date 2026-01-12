@@ -304,7 +304,42 @@ const fetchShipmentDetailsByReference = async (reference) => {
 
 exports.fetchShipmentDetailsByReference = fetchShipmentDetailsByReference;
 
+exports.fetchRates = async (payload) => {
+    const client = buildClient();
+    if (!client) {
+        console.warn('[shipcoService] Ship&Co client is not configured. Missing SHIPANDCO_API_TOKEN?');
+        return [];
+    }
+    try {
+        const response = await client.post('/rates', payload);
+        return response.data || [];
+    } catch (error) {
+        logError('shipcoService.fetchRates', error);
+        console.error('[shipcoService] Failed to fetch rates:', error?.message || error);
+        throw error;
+    }
+};
+
+exports.createShipment = async (payload) => {
+    const client = buildClient();
+    if (!client) {
+        console.warn('[shipcoService] Ship&Co client is not configured. Missing SHIPANDCO_API_TOKEN?');
+        throw new Error('Ship&Co client not configured');
+    }
+    try {
+        const response = await client.post('/shipments', payload);
+        return response.data;
+    } catch (error) {
+        logError('shipcoService.createShipment', error);
+        console.error('[shipcoService] Failed to create shipment:', error?.message || error);
+        throw error;
+    }
+};
+
 exports.fetchTrackingByReference = async (reference) => {
     const details = await fetchShipmentDetailsByReference(reference);
     return details ? details.trackingNumber || null : null;
 };
+
+exports.extractTrackingFromShipment = extractTrackingFromShipment;
+exports.extractCarrierFromShipment = extractCarrierFromShipment;

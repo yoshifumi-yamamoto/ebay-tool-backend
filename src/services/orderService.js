@@ -153,7 +153,35 @@ async function fetchOrdersFromEbay(refreshToken) {
     }
 }
 
-async function fetchCancelledOrderNosFromEbay(accessToken, marketplaceId = 'EBAY_US') {
+const normalizeCancelStatus = (value) => {
+    if (!value) return null;
+    return String(value).trim().toUpperCase();
+};
+
+const isFinalCancelStatus = (status) => {
+    const normalized = normalizeCancelStatus(status);
+    if (!normalized) return false;
+    if (normalized.includes('PENDING') || normalized.includes('REQUEST') || normalized.includes('INIT')) {
+        return false;
+    }
+    return normalized.includes('CANCEL') || normalized.includes('CANCELLED') || normalized.includes('CANCELED') || normalized.includes('CLOSED');
+};
+
+const extractCancellationStatus = (cancellation = {}) => {
+    return (
+        cancellation.status ||
+        cancellation.state ||
+        cancellation.cancel_status ||
+        cancellation.cancelStatus ||
+        cancellation.request_status ||
+        cancellation.requestStatus ||
+        cancellation.decision ||
+        cancellation?.request?.status ||
+        null
+    );
+};
+
+async function fetchCancellationSummariesFromEbay(accessToken, marketplaceId = 'EBAY_US') {
     const baseUrl = 'https://api.ebay.com/post-order/v2/cancellation/search';
     const headers = {
         Authorization: `IAF ${accessToken}`,
@@ -166,7 +194,7 @@ async function fetchCancelledOrderNosFromEbay(accessToken, marketplaceId = 'EBAY
     const creationDateRangeFrom = fromDate.toISOString();
     const creationDateRangeTo = now.toISOString();
 
-    const orderNos = new Set();
+    const cancellationsSummary = new Map();
     const limit = 200;
     let offset = 0;
 
@@ -196,22 +224,39 @@ async function fetchCancelledOrderNosFromEbay(accessToken, marketplaceId = 'EBAY
                 `count=${cancellations.length}`,
                 `keys=${Object.keys(data || {}).join(',') || 'none'}`
             );
-            const firstCancellation = cancellations[0] || null;
-            if (firstCancellation) {
+            const sampleCancellations = cancellations.slice(0, 3);
+            if (sampleCancellations.length > 0) {
                 console.info(
                     '[orderService] Cancellation sample:',
-                    JSON.stringify({
-                        order_id: firstCancellation?.order_id,
-                        orderId: firstCancellation?.orderId,
-                        order: firstCancellation?.order
-                            ? {
-                                order_id: firstCancellation.order.order_id,
-                                orderId: firstCancellation.order.orderId,
-                            }
-                            : null,
-                        legacy_order_id: firstCancellation?.legacy_order_id,
-                        legacyOrderId: firstCancellation?.legacyOrderId,
-                    })
+                    JSON.stringify(
+                        sampleCancellations.map((cancellation) => ({
+                            keys: Object.keys(cancellation || {}),
+                            order_id: cancellation?.order_id,
+                            orderId: cancellation?.orderId,
+                            order: cancellation?.order
+                                ? {
+                                    order_id: cancellation.order.order_id,
+                                    orderId: cancellation.order.orderId,
+                                }
+                                : null,
+                            legacy_order_id: cancellation?.legacy_order_id,
+                            legacyOrderId: cancellation?.legacyOrderId,
+                            status: cancellation?.status,
+                            state: cancellation?.state,
+                            cancel_status: cancellation?.cancel_status,
+                            cancelStatus: cancellation?.cancelStatus,
+                            request_status: cancellation?.request_status,
+                            requestStatus: cancellation?.requestStatus,
+                            decision: cancellation?.decision,
+                            request: cancellation?.request
+                                ? {
+                                    status: cancellation.request.status,
+                                    type: cancellation.request.type,
+                                }
+                                : null,
+                            closeReason: cancellation?.closeReason || cancellation?.close_reason || null,
+                        }))
+                    )
                 );
             }
         }
@@ -229,9 +274,11 @@ async function fetchCancelledOrderNosFromEbay(accessToken, marketplaceId = 'EBAY
                 cancellation?.order?.orderId ||
                 cancellation?.order?.order_id ||
                 null;
-            if (orderNo) {
-                orderNos.add(orderNo);
+            if (!orderNo) {
+                return;
             }
+            const status = extractCancellationStatus(cancellation);
+            cancellationsSummary.set(orderNo, status);
         });
 
         if (cancellations.length < limit) {
@@ -241,7 +288,10 @@ async function fetchCancelledOrderNosFromEbay(accessToken, marketplaceId = 'EBAY
         offset += cancellations.length;
     }
 
-    return Array.from(orderNos);
+    return Array.from(cancellationsSummary.entries()).map(([orderNo, status]) => ({
+        orderNo,
+        status,
+    }));
 }
 
 /**
@@ -1151,26 +1201,57 @@ async function saveOrdersAndBuyers(userId) {
 
             try {
                 const marketplaceId = account?.marketplace_id || process.env.EBAY_MARKETPLACE_ID || 'EBAY_US';
-                const cancelledOrderNos = await fetchCancelledOrderNosFromEbay(accessToken, marketplaceId);
-                if (cancelledOrderNos.length > 0) {
-                    let updateQuery = supabase
-                        .from('orders')
-                        .update({ status: 'CANCELED' })
-                        .in('order_no', cancelledOrderNos);
-                    if (ebayUserId) {
-                        updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
+                const cancellations = await fetchCancellationSummariesFromEbay(accessToken, marketplaceId);
+                if (cancellations.length > 0) {
+                    const cancelledOrderNos = cancellations
+                        .filter((item) => isFinalCancelStatus(item.status))
+                        .map((item) => item.orderNo);
+                    const requestedOrderNos = cancellations
+                        .filter((item) => !isFinalCancelStatus(item.status))
+                        .map((item) => item.orderNo);
+
+                    if (cancelledOrderNos.length > 0) {
+                        let updateQuery = supabase
+                            .from('orders')
+                            .update({ status: 'CANCELED' })
+                            .in('order_no', cancelledOrderNos);
+                        if (ebayUserId) {
+                            updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
+                        }
+                        const { error: cancelUpdateError } = await updateQuery;
+                        if (cancelUpdateError) {
+                            console.error(
+                                '[orderService] Failed to update cancelled orders:',
+                                cancelUpdateError.message
+                            );
+                        } else {
+                            console.info(
+                                '[orderService] Cancelled orders updated:',
+                                `count=${cancelledOrderNos.length}`
+                            );
+                        }
                     }
-                    const { error: cancelUpdateError } = await updateQuery;
-                    if (cancelUpdateError) {
-                        console.error(
-                            '[orderService] Failed to update cancelled orders:',
-                            cancelUpdateError.message
-                        );
-                    } else {
-                        console.info(
-                            '[orderService] Cancelled orders updated:',
-                            `count=${cancelledOrderNos.length}`
-                        );
+
+                    if (requestedOrderNos.length > 0) {
+                        let updateQuery = supabase
+                            .from('orders')
+                            .update({ status: 'CANCEL_REQUESTED' })
+                            .in('order_no', requestedOrderNos);
+                        if (ebayUserId) {
+                            updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
+                        }
+                        const { error: requestUpdateError } = await updateQuery;
+                        if (requestUpdateError) {
+                            console.error(
+                                '[orderService] Failed to update cancellation requested orders:',
+                                requestUpdateError.message
+                            );
+                        } else {
+                            console.info(
+                                '[orderService] Cancellation requested orders updated:',
+                                `count=${requestedOrderNos.length}`
+                            );
+                        }
                     }
                 } else {
                     console.info('[orderService] No cancellations found for update.');

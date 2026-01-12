@@ -71,6 +71,9 @@ exports.fetchPackingVerification = async (filters = {}) => {
   }
 
   const rows = data || [];
+  const trackingNumbers = Array.from(
+    new Set(rows.map((row) => row.shipping_tracking_number).filter(Boolean))
+  );
   const legacyItemIds = Array.from(
     new Set(
       rows
@@ -102,6 +105,21 @@ exports.fetchPackingVerification = async (filters = {}) => {
     }
   }
 
+  let carrierTotalsMap = {};
+  if (trackingNumbers.length > 0) {
+    const { data: carrierRows, error: carrierError } = await supabase
+      .from('v_carrier_awb_totals')
+      .select('awb_number, actual_total_amount')
+      .in('awb_number', trackingNumbers);
+
+    if (!carrierError && Array.isArray(carrierRows)) {
+      carrierTotalsMap = carrierRows.reduce((acc, row) => {
+        acc[row.awb_number] = row.actual_total_amount;
+        return acc;
+      }, {});
+    }
+  }
+
   const resolveEstimatedValue = (row, key) => {
     const existing = toNumberOrNull(row[key]);
     if (existing !== null) return existing;
@@ -120,7 +138,9 @@ exports.fetchPackingVerification = async (filters = {}) => {
       ...row,
       estimated_shipping_cost: resolveEstimatedValue(row, 'estimated_shipping_cost'),
       shipco_shipping_cost: toNumberOrNull(row.shipco_shipping_cost),
-      final_shipping_cost: toNumberOrNull(row.final_shipping_cost),
+      final_shipping_cost:
+        toNumberOrNull(row.final_shipping_cost) ??
+        toNumberOrNull(carrierTotalsMap[row.shipping_tracking_number]),
       estimated_parcel_weight: resolveEstimatedValue(row, 'estimated_parcel_weight'),
       estimated_parcel_length: resolveEstimatedValue(row, 'estimated_parcel_length'),
       estimated_parcel_width: resolveEstimatedValue(row, 'estimated_parcel_width'),
