@@ -123,18 +123,34 @@ async function syncSheetToSupabase(req, res) {
                 }
             }
 
-            const { data: activeItems, error: activeItemsError } = await supabase
-                .from('items')
-                .select('ebay_item_id')
-                .eq('user_id', userId)
-                .eq('ebay_user_id', ebay_user_id)
-                .eq('listing_status', 'ACTIVE');
-            if (activeItemsError) {
-                throw new Error(`Failed to fetch active items: ${activeItemsError.message}`);
-            }
-            const activeItemIdSet = new Set(
-                (activeItems || []).map((item) => item.ebay_item_id).filter(Boolean)
-            );
+            const fetchActiveItemIds = async () => {
+                const ids = [];
+                const pageSize = 1000;
+                let offset = 0;
+                for (let page = 0; page < 200; page += 1) {
+                    const { data, error } = await supabase
+                        .from('items')
+                        .select('ebay_item_id')
+                        .eq('user_id', userId)
+                        .eq('ebay_user_id', ebay_user_id)
+                        .eq('listing_status', 'ACTIVE')
+                        .order('ebay_item_id', { ascending: true })
+                        .range(offset, offset + pageSize - 1);
+                    if (error) {
+                        throw new Error(`Failed to fetch active items: ${error.message}`);
+                    }
+                    const pageIds = (data || []).map((item) => item.ebay_item_id).filter(Boolean);
+                    ids.push(...pageIds);
+                    if (pageIds.length < pageSize) {
+                        break;
+                    }
+                    offset += pageSize;
+                }
+                return ids;
+            };
+
+            const activeItemIds = await fetchActiveItemIds();
+            const activeItemIdSet = new Set(activeItemIds);
 
             // データ行を読み取る
             const dataStartRow = headerRowIndex + 2;

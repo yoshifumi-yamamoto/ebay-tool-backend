@@ -311,11 +311,12 @@ exports.fetchRates = async (payload) => {
         return [];
     }
     try {
+        console.info('[shipcoService] rates payload', payload);
         const response = await client.post('/rates', payload);
         return response.data || [];
     } catch (error) {
         logError('shipcoService.fetchRates', error);
-        console.error('[shipcoService] Failed to fetch rates:', error?.message || error);
+        console.error('[shipcoService] Failed to fetch rates:', error?.response?.data || error?.message || error);
         throw error;
     }
 };

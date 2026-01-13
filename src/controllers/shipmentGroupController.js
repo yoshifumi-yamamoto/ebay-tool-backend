@@ -33,9 +33,28 @@ async function createShipmentGroup(req, res) {
     }
 }
 
+async function getShipmentGroup(req, res) {
+    const groupId = req.params.id;
+    const userId = Number(req.query.user_id || req.query.userId);
+    if (!groupId) {
+        return res.status(400).json({ error: 'group id is required' });
+    }
+    if (!userId) {
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+    try {
+        const result = await shipmentGroupService.fetchShipmentGroupDetails(groupId, userId);
+        return res.status(200).json(result);
+    } catch (error) {
+        console.error('Failed to fetch shipment group:', error.message);
+        return res.status(500).json({ error: 'Failed to fetch shipment group' });
+    }
+}
+
 module.exports = {
     listShipmentGroups,
     createShipmentGroup,
+    getShipmentGroup,
     estimateRates: async (req, res) => {
         const groupId = req.params.id;
         const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);

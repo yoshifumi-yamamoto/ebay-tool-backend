@@ -4,6 +4,7 @@ const shipmentGroupController = require('../controllers/shipmentGroupController'
 const router = express.Router();
 
 router.get('/', shipmentGroupController.listShipmentGroups);
+router.get('/:id', shipmentGroupController.getShipmentGroup);
 router.post('/', shipmentGroupController.createShipmentGroup);
 router.post('/:id/rates', shipmentGroupController.estimateRates);
 router.post('/:id/ship', shipmentGroupController.createShipment);

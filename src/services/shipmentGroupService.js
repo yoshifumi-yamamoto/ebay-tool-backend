@@ -34,6 +34,7 @@ const buildDefaultParcel = (order = {}) => {
         width: Number(width) || 0,
         height: Number(height) || 0,
         depth: Number(length) || 0,
+        amount: 1,
     };
 };
 
@@ -62,7 +63,7 @@ const fetchGroupOrders = async (groupId, userId) => {
     }
     const { data: orders, error: ordersError } = await supabase
         .from('orders')
-        .select('order_no, ship_to, shipco_parcel_weight, shipco_parcel_length, shipco_parcel_width, shipco_parcel_height, estimated_parcel_weight, estimated_parcel_length, estimated_parcel_width, estimated_parcel_height')
+        .select('order_no, ship_to, subtotal, subtotal_currency, total_amount_currency, earnings, earnings_currency, shipco_parcel_weight, shipco_parcel_length, shipco_parcel_width, shipco_parcel_height, estimated_parcel_weight, estimated_parcel_length, estimated_parcel_width, estimated_parcel_height')
         .in('order_no', orderNos);
     if (ordersError) {
         throw new Error(`Failed to fetch orders: ${ordersError.message}`);
@@ -79,14 +80,41 @@ const buildRatePayload = ({ toAddress, fromAddress, parcels, products, customs, 
     setup,
 });
 
+const buildDefaultCustoms = (order = {}, setup = {}) => {
+    const currency =
+        setup?.currency ||
+        order.subtotal_currency ||
+        order.total_amount_currency ||
+        order.earnings_currency ||
+        'JPY';
+    const amount =
+        typeof order.subtotal === 'number'
+            ? order.subtotal
+            : typeof order.earnings === 'number'
+                ? order.earnings
+                : 1;
+    return {
+        customs: { content_type: 'MERCHANDISE' },
+        products: [
+            {
+                name: 'Merchandise',
+                quantity: 1,
+                price: amount,
+                origin_country: 'JP',
+                currency,
+            },
+        ],
+    };
+};
+
 async function estimateRates(groupId, userId, payload = {}) {
-    const { from_address, parcels, products, customs, setup } = payload;
+    const { from_address, to_address, parcels, products, customs, setup } = payload;
     if (!from_address) {
         throw new Error('from_address is required');
     }
     const { orders } = await fetchGroupOrders(groupId, userId);
     const primaryOrder = orders[0];
-    const toAddress = buildShipcoAddress(primaryOrder?.ship_to || {});
+    const toAddress = to_address || buildShipcoAddress(primaryOrder?.ship_to || {});
     const resolvedParcels = Array.isArray(parcels) && parcels.length > 0
         ? parcels
         : (() => {
@@ -97,19 +125,40 @@ async function estimateRates(groupId, userId, payload = {}) {
         throw new Error('parcel info is required');
     }
 
+    const normalizedParcels = resolvedParcels.map((parcel) => ({
+        ...parcel,
+        amount: Number(parcel?.amount) > 0 ? Number(parcel.amount) : 1,
+    }));
     const requestPayload = buildRatePayload({
         toAddress,
         fromAddress: from_address,
-        parcels: resolvedParcels,
+        parcels: normalizedParcels,
         products: products || [],
         customs: customs || undefined,
         setup: setup || {},
+    });
+    const isInternational =
+        from_address?.country &&
+        toAddress?.country &&
+        String(from_address.country).toUpperCase() !== String(toAddress.country).toUpperCase();
+    if (isInternational && (!products || products.length === 0 || !customs)) {
+        const defaults = buildDefaultCustoms(primaryOrder || {}, setup || {});
+        requestPayload.products = defaults.products;
+        requestPayload.customs = defaults.customs;
+        if (!requestPayload.setup?.currency) {
+            requestPayload.setup = { ...(requestPayload.setup || {}), currency: defaults.products[0].currency };
+        }
+    }
+    console.info('[shipmentGroupService] rate payload', {
+        groupId,
+        userId,
+        payload: requestPayload,
     });
     return await shipcoService.fetchRates(requestPayload);
 }
 
 async function createShipmentForGroup(groupId, userId, payload = {}) {
-    const { from_address, parcels, products, customs, setup } = payload;
+    const { from_address, to_address, parcels, products, customs, setup } = payload;
     if (!from_address) {
         throw new Error('from_address is required');
     }
@@ -118,7 +167,7 @@ async function createShipmentForGroup(groupId, userId, payload = {}) {
     }
     const { group, orders, orderNos } = await fetchGroupOrders(groupId, userId);
     const primaryOrder = orders[0];
-    const toAddress = buildShipcoAddress(primaryOrder?.ship_to || {});
+    const toAddress = to_address || buildShipcoAddress(primaryOrder?.ship_to || {});
     const resolvedParcels = Array.isArray(parcels) && parcels.length > 0
         ? parcels
         : (() => {
@@ -129,14 +178,30 @@ async function createShipmentForGroup(groupId, userId, payload = {}) {
         throw new Error('parcel info is required');
     }
 
+    const normalizedParcels = resolvedParcels.map((parcel) => ({
+        ...parcel,
+        amount: Number(parcel?.amount) > 0 ? Number(parcel.amount) : 1,
+    }));
     const requestPayload = buildRatePayload({
         toAddress,
         fromAddress: from_address,
-        parcels: resolvedParcels,
+        parcels: normalizedParcels,
         products: products || [],
         customs: customs || undefined,
         setup,
     });
+    const isInternational =
+        from_address?.country &&
+        toAddress?.country &&
+        String(from_address.country).toUpperCase() !== String(toAddress.country).toUpperCase();
+    if (isInternational && (!products || products.length === 0 || !customs)) {
+        const defaults = buildDefaultCustoms(primaryOrder || {}, setup || {});
+        requestPayload.products = defaults.products;
+        requestPayload.customs = defaults.customs;
+        if (!requestPayload.setup?.currency) {
+            requestPayload.setup = { ...(requestPayload.setup || {}), currency: defaults.products[0].currency };
+        }
+    }
 
     const shipment = await shipcoService.createShipment(requestPayload);
     const trackingNumber = shipcoService.extractTrackingFromShipment(shipment);
@@ -185,6 +250,15 @@ async function listShipmentGroups(userId, status = 'draft') {
         throw new Error(`Failed to fetch shipment groups: ${error.message}`);
     }
     return data || [];
+}
+
+async function fetchShipmentGroupDetails(groupId, userId) {
+    const { group, orders, orderNos } = await fetchGroupOrders(groupId, userId);
+    return {
+        group,
+        orders,
+        orderNos,
+    };
 }
 
 async function createShipmentGroup(userId, orderNos, primaryOrderNo) {
@@ -245,6 +319,7 @@ async function createShipmentGroup(userId, orderNos, primaryOrderNo) {
 
 module.exports = {
     listShipmentGroups,
+    fetchShipmentGroupDetails,
     createShipmentGroup,
     estimateRates,
     createShipmentForGroup,
