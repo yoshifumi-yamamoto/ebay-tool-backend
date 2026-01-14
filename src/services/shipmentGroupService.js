@@ -206,6 +206,7 @@ async function createShipmentForGroup(groupId, userId, payload = {}) {
     const shipment = await shipcoService.createShipment(requestPayload);
     const trackingNumber = shipcoService.extractTrackingFromShipment(shipment);
     const carrierCode = shipcoService.extractCarrierFromShipment(shipment);
+    const labelUrl = shipment?.delivery?.label || null;
     if (!trackingNumber || !carrierCode) {
         throw new Error('tracking number or carrier code missing from Ship&Co response');
     }
@@ -223,6 +224,8 @@ async function createShipmentForGroup(groupId, userId, payload = {}) {
         .update({
             status: 'shipped',
             tracking_number: trackingNumber,
+            label_url: labelUrl,
+            shipment_id: shipment?.id || null,
             shipping_carrier: carrierCode,
             shipped_at: new Date().toISOString(),
         })
@@ -231,13 +234,13 @@ async function createShipmentForGroup(groupId, userId, payload = {}) {
         throw new Error(`Failed to update shipment group: ${updateError.message}`);
     }
 
-    return { shipment, trackingNumber, carrierCode };
+    return { shipment, trackingNumber, carrierCode, labelUrl };
 }
 
 async function listShipmentGroups(userId, status = 'draft') {
     let query = supabase
         .from('shipment_groups')
-        .select('id, user_id, status, primary_order_no, tracking_number, shipping_carrier, shipped_at, created_at, shipment_group_orders(order_no)')
+        .select('id, user_id, status, primary_order_no, tracking_number, label_url, shipment_id, shipping_carrier, shipped_at, created_at, shipment_group_orders(order_no)')
         .eq('user_id', userId)
         .order('created_at', { ascending: false });
 

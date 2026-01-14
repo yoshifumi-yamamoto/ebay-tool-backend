@@ -89,6 +89,8 @@ exports.fetchPackingVerification = async (filters = {}) => {
       .from('items')
       .select(`
         ebay_item_id,
+        item_title,
+        primary_image_url,
         estimated_shipping_cost,
         estimated_parcel_length,
         estimated_parcel_width,
@@ -136,6 +138,26 @@ exports.fetchPackingVerification = async (filters = {}) => {
   return {
     data: rows.map((row) => ({
       ...row,
+      item_title: (() => {
+        const lineItems = row.order_line_items || [];
+        for (const item of lineItems) {
+          const legacyId = item?.legacy_item_id;
+          if (!legacyId) continue;
+          const title = itemsMap[legacyId]?.item_title;
+          if (title) return title;
+        }
+        return null;
+      })(),
+      primary_image_url: (() => {
+        const lineItems = row.order_line_items || [];
+        for (const item of lineItems) {
+          const legacyId = item?.legacy_item_id;
+          if (!legacyId) continue;
+          const url = itemsMap[legacyId]?.primary_image_url;
+          if (url) return url;
+        }
+        return null;
+      })(),
       estimated_shipping_cost: resolveEstimatedValue(row, 'estimated_shipping_cost'),
       shipco_shipping_cost: toNumberOrNull(row.shipco_shipping_cost),
       final_shipping_cost:
