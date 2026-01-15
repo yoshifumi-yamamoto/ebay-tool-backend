@@ -122,20 +122,24 @@ const processShippingCostsCSVUpload = async (req, res) => {
 };
 
 const processCarrierInvoicesCSVUpload = async (req, res) => {
-    const file = req.file;
+    const files = Array.isArray(req.files) ? req.files : [];
 
-    if (!file) {
-        console.error('No file uploaded');
-        return res.status(400).json({ error: 'No file uploaded' });
+    if (!files.length) {
+        console.error('No files uploaded');
+        return res.status(400).json({ error: 'No files uploaded' });
     }
 
     try {
-        const bufferStream = new Readable();
-        bufferStream.push(file.buffer);
-        bufferStream.push(null);
+        const results = [];
+        for (const file of files) {
+            const bufferStream = new Readable();
+            bufferStream.push(file.buffer);
+            bufferStream.push(null);
 
-        const result = await updateCarrierInvoicesFromCSV(bufferStream, file.originalname);
-        res.status(200).json({ message: 'Carrier invoice CSV processed', result });
+            const result = await updateCarrierInvoicesFromCSV(bufferStream, file.originalname);
+            results.push({ file: file.originalname, result });
+        }
+        res.status(200).json({ message: 'Carrier invoice CSV processed', results });
     } catch (error) {
         console.error('Error processing carrier invoice CSV:', error.message);
         res.status(500).json({ error: 'Error processing carrier invoice CSV' });

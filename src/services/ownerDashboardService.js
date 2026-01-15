@@ -67,6 +67,12 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       'shipping_status',
       'shipco_synced_at',
       'order_date',
+      'order_no',
+      'buyer_country_code',
+      'image_url',
+      'line_items',
+      'subtotal_currency',
+      'total_amount_currency',
     ].join(','))
     .eq('user_id', userId)
     .gte('order_date', fromTs.toISOString())
@@ -85,6 +91,34 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
   const ordersCount = activityOrders.length;
   const estShippingTotal = sumField(activityOrders, 'estimated_shipping_cost');
   const estDdpTotal = 0;
+
+  const resolveCurrency = (order) => {
+    return order.subtotal_currency || order.total_amount_currency || null;
+  };
+  const defaultCurrency = activityOrders.find((order) => resolveCurrency(order))?.subtotal_currency
+    || activityOrders.find((order) => resolveCurrency(order))?.total_amount_currency
+    || 'USD';
+
+  const extractTitleFromLineItems = (lineItems) => {
+    if (!lineItems) return null;
+    const items = Array.isArray(lineItems) ? lineItems : [lineItems];
+    for (const item of items) {
+      const title = item?.title || item?.item_title || item?.itemTitle || item?.name || null;
+      if (title) return title;
+    }
+    return null;
+  };
+
+  const orderDetails = activityOrders.map((order) => ({
+    order_no: order.order_no || null,
+    title: extractTitleFromLineItems(order.line_items),
+    image_url: order.image_url || null,
+    price: toNumber(order.subtotal) || toNumber(order.total_amount),
+    price_currency: resolveCurrency(order) || defaultCurrency,
+    cost_price: toNumber(order.cost_price),
+    estimated_shipping_cost: toNumber(order.estimated_shipping_cost),
+    buyer_country_code: order.buyer_country_code || null,
+  }));
 
   const shippingConfirmedOrders = activityOrders.filter((order) => {
     const value = order.shipco_synced_at;
@@ -150,12 +184,14 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       gross_sales: grossSales,
       orders: ordersCount,
       aov: ordersCount > 0 ? grossSales / ordersCount : 0,
+      currency: defaultCurrency,
     },
     lane_a: {
       new_orders: ordersCount,
       gross_sales: grossSales,
       est_shipping_total: estShippingTotal,
       est_ddp_total: estDdpTotal,
+      currency: defaultCurrency,
     },
     lane_b: {
       shipping_confirmed: {
@@ -168,12 +204,15 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       },
       newly_settled_orders: settledOrders.length,
       confirmed_profit: settledProfit,
+      currency: defaultCurrency,
     },
     risk: {
       refund_amount: sumField(refunds || [], 'amount'),
       refund_count: (refunds || []).length,
       return_request_count: (returns || []).length,
+      currency: defaultCurrency,
     },
+    order_details: orderDetails,
   };
 }
 

@@ -28,9 +28,9 @@ router.post('/upload-shipping-costs', upload.single('file'), (req, res, next) =>
   next();
 }, csvController.processShippingCostsCSVUpload);
 
-router.post('/upload-carrier-invoices', upload.single('file'), (req, res, next) => {
+router.post('/upload-carrier-invoices', upload.array('files', 20), (req, res, next) => {
   console.log('Received request body:', req.body);
-  console.log('Received file:', req.file);
+  console.log('Received files:', req.files);
   next();
 }, csvController.processCarrierInvoicesCSVUpload);
 
