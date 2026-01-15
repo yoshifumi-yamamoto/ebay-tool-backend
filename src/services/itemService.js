@@ -180,27 +180,19 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
 
     try {
         const requestBody = `<?xml version="1.0" encoding="utf-8"?>
-        <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+        <GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
             <RequesterCredentials>
                 <eBayAuthToken>${authToken}</eBayAuthToken>
             </RequesterCredentials>
-            <Pagination>
-                <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
-                <PageNumber>${pageNumber}</PageNumber>
-            </Pagination>
+            <ActiveList>
+                <Include>true</Include>
+                <Pagination>
+                    <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+                    <PageNumber>${pageNumber}</PageNumber>
+                </Pagination>
+            </ActiveList>
             <DetailLevel>ReturnAll</DetailLevel>
-            <OutputSelector>PaginationResult.TotalNumberOfEntries</OutputSelector>
-            <OutputSelector>HasMoreItems</OutputSelector>
-            <OutputSelector>ReturnedItemCountActual</OutputSelector>
-            <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
-            <OutputSelector>ItemArray.Item.Title</OutputSelector>
-            <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
-            <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
-            <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
-            <OutputSelector>ItemArray.Item.StartPrice</OutputSelector>
-            <OutputSelector>ItemArray.Item.SellingStatus.ListingStatus</OutputSelector>
-            <OutputSelector>ItemArray.Item.SellingStatus.CurrentPrice</OutputSelector>
-        </GetSellerListRequest>`;
+        </GetMyeBaySellingRequest>`;
 
         const response = await retryFetch(() => axios.post('https://api.ebay.com/ws/api.dll',
             requestBody,
@@ -211,7 +203,7 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                     'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID,
                     'X-EBAY-API-APP-NAME': process.env.EBAY_APP_ID,
                     'X-EBAY-API-CERT-NAME': process.env.EBAY_CERT_ID,
-                    'X-EBAY-API-CALL-NAME': 'GetSellerList',
+                    'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
                     'X-EBAY-API-SITEID': '0',
                 }
             }
@@ -220,17 +212,18 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
         const parser = new xml2js.Parser({ explicitArray: false });
         const result = await parser.parseStringPromise(response.data);
 
-        const responseBody = result.GetSellerListResponse || {};
+        const responseBody = result.GetMyeBaySellingResponse || {};
         const ack = responseBody.Ack || null;
         const errors = responseBody.Errors || null;
-        const paginationRoot = responseBody.PaginationResult || {};
+        const activeList = responseBody.ActiveList || {};
+        const paginationRoot = activeList.PaginationResult || {};
         const totalEntries = parseInt(paginationRoot.TotalNumberOfEntries, 10) || 0;
-        const returnedCount = parseInt(responseBody.ReturnedItemCountActual, 10) || 0;
-        const hasMoreItems = String(responseBody.HasMoreItems).toLowerCase() === 'true';
-        const rawItems = responseBody.ItemArray?.Item;
+        const returnedCount = parseInt(activeList.ReturnedItemCountActual, 10) || 0;
+        const hasMoreItems = String(activeList.HasMoreItems ?? '').toLowerCase() === 'true';
+        const rawItems = activeList.ItemArray?.Item;
         if (!rawItems) {
             if (returnedCount === 0) {
-                logSyncEvent('info', 'GetSellerList empty result', {
+                logSyncEvent('info', 'GetMyeBaySelling empty result', {
                     ack,
                     errors,
                     pageNumber,
@@ -239,11 +232,11 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                 });
                 return { listings: [], totalEntries, hasMoreItems };
             }
-            console.error('GetSellerList missing ItemArray', {
+            console.error('GetMyeBaySelling missing ItemArray', {
                 ack,
                 errors,
             });
-            logSyncEvent('error', 'GetSellerList missing ItemArray', {
+            logSyncEvent('error', 'GetMyeBaySelling missing ItemArray', {
                 ack,
                 errors,
                 pageNumber,
@@ -253,7 +246,7 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                 error_code: 'EBAY_SELLER_LIST_MISSING',
                 category: 'LISTINGS_SYNC',
                 provider: 'ebay',
-                message: 'GetSellerList missing ItemArray',
+                message: 'GetMyeBaySelling missing ItemArray',
                 payload_summary: { pageNumber, entriesPerPage },
                 details: { ack, errors },
             });
