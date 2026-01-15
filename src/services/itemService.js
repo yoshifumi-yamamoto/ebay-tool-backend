@@ -179,19 +179,11 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
     };
 
     try {
-        const now = new Date();
-        const from = new Date(now);
-        from.setDate(from.getDate() - 30);
-        const to = new Date(now);
-        to.setDate(to.getDate() + 30);
-
         const requestBody = `<?xml version="1.0" encoding="utf-8"?>
         <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
             <RequesterCredentials>
                 <eBayAuthToken>${authToken}</eBayAuthToken>
             </RequesterCredentials>
-            <EndTimeFrom>${from.toISOString()}</EndTimeFrom>
-            <EndTimeTo>${to.toISOString()}</EndTimeTo>
             <Pagination>
                 <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
                 <PageNumber>${pageNumber}</PageNumber>
