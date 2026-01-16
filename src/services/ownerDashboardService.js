@@ -1,6 +1,24 @@
 const supabase = require('../supabaseClient');
 
 const TIME_ZONE_EBAY = 'America/Los_Angeles';
+const DEFAULT_DASHBOARD_CURRENCY = 'USD';
+
+const ENV_EXCHANGE_RATES = {
+  USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
+  EUR: Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null,
+  CAD: Number(process.env.EXCHANGE_RATE_CAD_TO_JPY) || null,
+  GBP: Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null,
+  AUD: Number(process.env.EXCHANGE_RATE_AUD_TO_JPY) || null,
+  JPY: 1,
+};
+
+const normalizeCurrencyCode = (value) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed.toUpperCase() : null;
+};
 
 const toNumber = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
 
@@ -47,11 +65,95 @@ const ebayDayToUtcRange = (fromDay, toDay) => {
 
 const sumField = (rows, field) => rows.reduce((acc, row) => acc + toNumber(row[field]), 0);
 
+const addAmountByCurrency = (bucket, currency, amount) => {
+  const numeric = toNumber(amount);
+  if (!Number.isFinite(numeric) || numeric === 0) {
+    return;
+  }
+  const key = normalizeCurrencyCode(currency) || DEFAULT_DASHBOARD_CURRENCY;
+  bucket[key] = (bucket[key] || 0) + numeric;
+};
+
+const loadExchangeRatesForUser = async (userId) => {
+  const rates = { ...ENV_EXCHANGE_RATES, JPY: 1 };
+  const targetUserId = userId || 2;
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('usd_rate, eur_rate, cad_rate, gbp_rate, aud_rate')
+      .eq('id', targetUserId)
+      .single();
+    if (error || !data) {
+      if (error) {
+        console.error('Failed to load user exchange rates:', error.message);
+      }
+      return rates;
+    }
+    const mapping = {
+      usd_rate: 'USD',
+      eur_rate: 'EUR',
+      cad_rate: 'CAD',
+      gbp_rate: 'GBP',
+      aud_rate: 'AUD',
+    };
+    Object.entries(mapping).forEach(([column, currency]) => {
+      const raw = data[column];
+      const numeric = raw === null || raw === undefined ? null : Number(raw);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        rates[currency] = numeric;
+      }
+    });
+  } catch (err) {
+    console.error('Unexpected error while loading exchange rates:', err);
+  }
+  return rates;
+};
+
+const convertAmountToUsd = (amount, currency, exchangeRates) => {
+  const numeric = toNumber(amount);
+  if (!Number.isFinite(numeric) || numeric === 0) {
+    return 0;
+  }
+  const normalized = normalizeCurrencyCode(currency) || DEFAULT_DASHBOARD_CURRENCY;
+  if (normalized === 'USD') {
+    return numeric;
+  }
+  const usdRate = exchangeRates.USD;
+  if (!usdRate) {
+    return null;
+  }
+  if (normalized === 'JPY') {
+    return numeric / usdRate;
+  }
+  const rateToJpy = exchangeRates[normalized];
+  if (!rateToJpy) {
+    return null;
+  }
+  return (numeric * rateToJpy) / usdRate;
+};
+
+const convertAmountToJpy = (amount, currency, exchangeRates) => {
+  const numeric = toNumber(amount);
+  if (!Number.isFinite(numeric) || numeric === 0) {
+    return 0;
+  }
+  const normalized = normalizeCurrencyCode(currency) || DEFAULT_DASHBOARD_CURRENCY;
+  if (normalized === 'JPY') {
+    return numeric;
+  }
+  const rateToJpy = exchangeRates[normalized];
+  if (!rateToJpy) {
+    return null;
+  }
+  return numeric * rateToJpy;
+};
+
 async function fetchTodayMetrics({ userId, fromDay, toDay }) {
   if (!userId || !fromDay || !toDay) {
     throw new Error('userId, fromDay and toDay are required');
   }
 
+  const exchangeRates = await loadExchangeRatesForUser(userId);
   const { fromTs, toTs } = ebayDayToUtcRange(fromDay, toDay);
 
   const { data: orders, error: ordersError } = await supabase
@@ -71,6 +173,7 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       'buyer_country_code',
       'image_url',
       'line_items',
+      'order_line_items(title,item_image)',
       'subtotal_currency',
       'total_amount_currency',
     ].join(','))
@@ -83,42 +186,103 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
   }
 
   const activityOrders = orders || [];
-  const grossSales = activityOrders.reduce((acc, order) => {
-    const subtotal = toNumber(order.subtotal);
-    const total = toNumber(order.total_amount);
-    return acc + (subtotal > 0 ? subtotal : total);
-  }, 0);
-  const ordersCount = activityOrders.length;
-  const estShippingTotal = sumField(activityOrders, 'estimated_shipping_cost');
-  const estDdpTotal = 0;
-
-  const resolveCurrency = (order) => {
-    return order.subtotal_currency || order.total_amount_currency || null;
-  };
-  const defaultCurrency = activityOrders.find((order) => resolveCurrency(order))?.subtotal_currency
-    || activityOrders.find((order) => resolveCurrency(order))?.total_amount_currency
-    || 'USD';
+  const resolveCurrency = (order) => order.subtotal_currency || order.total_amount_currency || null;
+  const defaultCurrency =
+    activityOrders.find((order) => resolveCurrency(order))?.subtotal_currency ||
+    activityOrders.find((order) => resolveCurrency(order))?.total_amount_currency ||
+    DEFAULT_DASHBOARD_CURRENCY;
+  const grossSalesByCurrency = {};
+  const ordersByCurrency = {};
+  const missingExchangeRates = new Set();
+  let grossSalesUsd = 0;
+  let ordersConvertedCount = 0;
 
   const extractTitleFromLineItems = (lineItems) => {
     if (!lineItems) return null;
     const items = Array.isArray(lineItems) ? lineItems : [lineItems];
     for (const item of items) {
-      const title = item?.title || item?.item_title || item?.itemTitle || item?.name || null;
+      const title =
+        item?.title ||
+        item?.item_title ||
+        item?.itemTitle ||
+        item?.name ||
+        item?.item?.title ||
+        null;
       if (title) return title;
     }
     return null;
   };
 
-  const orderDetails = activityOrders.map((order) => ({
-    order_no: order.order_no || null,
-    title: extractTitleFromLineItems(order.line_items),
-    image_url: order.image_url || null,
-    price: toNumber(order.subtotal) || toNumber(order.total_amount),
-    price_currency: resolveCurrency(order) || defaultCurrency,
-    cost_price: toNumber(order.cost_price),
-    estimated_shipping_cost: toNumber(order.estimated_shipping_cost),
-    buyer_country_code: order.buyer_country_code || null,
-  }));
+  const extractImageFromLineItems = (lineItems) => {
+    if (!lineItems) return null;
+    const items = Array.isArray(lineItems) ? lineItems : [lineItems];
+    for (const item of items) {
+      const direct =
+        item?.item_image ||
+        item?.itemImage ||
+        item?.image_url ||
+        item?.imageUrl ||
+        item?.primary_image_url ||
+        null;
+      if (typeof direct === 'string' && direct.trim()) {
+        return direct;
+      }
+      const nested =
+        item?.itemImage?.imageUrl ||
+        item?.itemImage?.url ||
+        item?.image?.imageUrl ||
+        item?.image?.url ||
+        null;
+      if (typeof nested === 'string' && nested.trim()) {
+        return nested;
+      }
+    }
+    return null;
+  };
+
+  const getOrderLineItems = (order) => {
+    if (Array.isArray(order?.order_line_items) && order.order_line_items.length) {
+      return order.order_line_items;
+    }
+    return order?.line_items || [];
+  };
+
+  const orderDetails = activityOrders.map((order) => {
+    const lineItems = getOrderLineItems(order);
+    const price = toNumber(order.subtotal) || toNumber(order.total_amount);
+    const currencyRaw = resolveCurrency(order) || defaultCurrency;
+    const currency = normalizeCurrencyCode(currencyRaw) || DEFAULT_DASHBOARD_CURRENCY;
+    addAmountByCurrency(grossSalesByCurrency, currency, price);
+    ordersByCurrency[currency] = (ordersByCurrency[currency] || 0) + 1;
+    const converted = convertAmountToUsd(price, currency, exchangeRates);
+    if (converted === null) {
+      missingExchangeRates.add(currency);
+    } else {
+      grossSalesUsd += converted;
+      ordersConvertedCount += 1;
+    }
+    return {
+      order_no: order.order_no || null,
+      title: extractTitleFromLineItems(lineItems),
+      image_url: order.image_url || extractImageFromLineItems(lineItems) || null,
+      price,
+      price_currency: currency,
+      cost_price: toNumber(order.cost_price),
+      estimated_shipping_cost: toNumber(order.estimated_shipping_cost),
+      buyer_country_code: order.buyer_country_code || null,
+    };
+  });
+
+  const ordersCount = activityOrders.length;
+  const estShippingTotal = sumField(activityOrders, 'estimated_shipping_cost');
+  const estDdpTotal = 0;
+  const grossSalesUsdValue = grossSalesUsd;
+  const aovUsd = ordersConvertedCount > 0 ? grossSalesUsdValue / ordersConvertedCount : 0;
+  const aovByCurrency = Object.entries(grossSalesByCurrency).reduce((acc, [currency, amount]) => {
+    const count = ordersByCurrency[currency] || 0;
+    acc[currency] = count > 0 ? amount / count : 0;
+    return acc;
+  }, {});
 
   const shippingConfirmedOrders = activityOrders.filter((order) => {
     const value = order.shipco_synced_at;
@@ -143,11 +307,20 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
     return ts >= fromTs && ts < toTs;
   });
   const settledProfit = settledOrders.reduce((acc, order) => {
-    return acc
-      + (toNumber(order.subtotal) || toNumber(order.total_amount))
-      - toNumber(order.cost_price)
-      - (toNumber(order.final_shipping_cost) || toNumber(order.shipco_shipping_cost))
-      - 0;
+    const revenue = toNumber(order.subtotal) || toNumber(order.total_amount);
+    const currency = normalizeCurrencyCode(resolveCurrency(order) || defaultCurrency) || DEFAULT_DASHBOARD_CURRENCY;
+    const revenueJpy = convertAmountToJpy(revenue, currency, exchangeRates);
+    if (revenueJpy === null) {
+      missingExchangeRates.add(currency);
+      return acc;
+    }
+    return (
+      acc +
+      revenueJpy -
+      toNumber(order.cost_price) -
+      (toNumber(order.final_shipping_cost) || toNumber(order.shipco_shipping_cost)) -
+      0
+    );
   }, 0);
 
   let refunds = [];
@@ -181,17 +354,24 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       time_zone: TIME_ZONE_EBAY,
     },
     activity: {
-      gross_sales: grossSales,
+      gross_sales: grossSalesUsdValue,
+      gross_sales_usd: grossSalesUsdValue,
+      gross_sales_by_currency: grossSalesByCurrency,
       orders: ordersCount,
-      aov: ordersCount > 0 ? grossSales / ordersCount : 0,
-      currency: defaultCurrency,
+      aov: aovUsd,
+      aov_usd: aovUsd,
+      aov_by_currency: aovByCurrency,
+      currency: DEFAULT_DASHBOARD_CURRENCY,
+      missing_exchange_rates: Array.from(missingExchangeRates),
     },
     lane_a: {
       new_orders: ordersCount,
-      gross_sales: grossSales,
+      gross_sales: grossSalesUsdValue,
+      gross_sales_usd: grossSalesUsdValue,
+      gross_sales_by_currency: grossSalesByCurrency,
       est_shipping_total: estShippingTotal,
       est_ddp_total: estDdpTotal,
-      currency: defaultCurrency,
+      currency: DEFAULT_DASHBOARD_CURRENCY,
     },
     lane_b: {
       shipping_confirmed: {
@@ -204,13 +384,13 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       },
       newly_settled_orders: settledOrders.length,
       confirmed_profit: settledProfit,
-      currency: defaultCurrency,
+      currency: DEFAULT_DASHBOARD_CURRENCY,
     },
     risk: {
       refund_amount: sumField(refunds || [], 'amount'),
       refund_count: (refunds || []).length,
       return_request_count: (returns || []).length,
-      currency: defaultCurrency,
+      currency: DEFAULT_DASHBOARD_CURRENCY,
     },
     order_details: orderDetails,
   };
