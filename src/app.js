@@ -33,6 +33,7 @@ const caseRoutes = require('./routes/caseRoutes');
 const systemErrorRoutes = require('./routes/systemErrorRoutes');
 const packingVerificationRoutes = require('./routes/packingVerificationRoutes');
 const countryCodeRoutes = require('./routes/countryCodeRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
 
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
@@ -127,6 +128,7 @@ app.use('/api/cases', caseRoutes);
 app.use('/api/system-errors', systemErrorRoutes);
 app.use('/api/packing-verification', packingVerificationRoutes);
 app.use('/api/country-codes', countryCodeRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {
