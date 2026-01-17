@@ -14,6 +14,8 @@ router.put('/line-items/:lineItemId/procurement-tracking', orderController.updat
 
 // 注文のeBay追跡情報アップロード
 router.post('/:orderNo/tracking', orderController.uploadTrackingInfo);
+router.post('/:orderNo/shipco/rates', orderController.estimateShipcoRates);
+router.post('/:orderNo/shipco/label', orderController.createShipcoShipment);
 
 // 発送ステータスを一括でSHIPPEDに更新
 router.put('/shipping-status/bulk', orderController.markOrdersAsShipped);

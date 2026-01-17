@@ -1,4 +1,5 @@
 const orderService = require('../services/orderService');
+const orderShipcoService = require('../services/orderShipcoService');
 const { logSystemError } = require('../services/systemErrorService');
 
 // eBayの注文とバイヤー情報を同期
@@ -115,6 +116,42 @@ exports.uploadTrackingInfo = async (req, res) => {
             payload_summary: { orderNo },
         });
         res.status(500).json({ error: error.message });
+    }
+};
+
+exports.estimateShipcoRates = async (req, res) => {
+    const orderNo = req.params.orderNo;
+    const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);
+    if (!orderNo) {
+        return res.status(400).json({ error: 'orderNo is required' });
+    }
+    if (!userId) {
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+    try {
+        const rates = await orderShipcoService.estimateRates(orderNo, userId, req.body || {});
+        return res.status(200).json({ rates });
+    } catch (error) {
+        console.error('Failed to estimate Ship&Co rates:', error.message);
+        return res.status(500).json({ error: 'Failed to estimate Ship&Co rates' });
+    }
+};
+
+exports.createShipcoShipment = async (req, res) => {
+    const orderNo = req.params.orderNo;
+    const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);
+    if (!orderNo) {
+        return res.status(400).json({ error: 'orderNo is required' });
+    }
+    if (!userId) {
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+    try {
+        const result = await orderShipcoService.createShipment(orderNo, userId, req.body || {});
+        return res.status(200).json(result);
+    } catch (error) {
+        console.error('Failed to create Ship&Co shipment:', error.message);
+        return res.status(500).json({ error: 'Failed to create Ship&Co shipment' });
     }
 };
 

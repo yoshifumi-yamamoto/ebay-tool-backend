@@ -1517,6 +1517,7 @@ async function uploadTrackingInfoToEbay({
     shippingServiceCode,
     shippedDate,
     lineItems,
+    statusOverride,
 }) {
     if (!orderNo) {
         throw new Error('orderNo is required');
@@ -1687,11 +1688,12 @@ async function uploadTrackingInfoToEbay({
         throw new Error('Failed to upload tracking information to eBay');
     }
 
+    const nextShippingStatus = statusOverride || 'SHIPPED';
     const { data: updatedOrder, error: updateError } = await supabase
         .from('orders')
         .update({
             shipping_tracking_number: trackingNumber,
-            shipping_status: 'SHIPPED',
+            shipping_status: nextShippingStatus,
         })
         .eq('order_no', orderNo)
         .select('*, order_line_items(*)')
