@@ -2,6 +2,8 @@ const supabase = require('../supabaseClient');
 
 const TIME_ZONE_EBAY = 'America/Los_Angeles';
 const DEFAULT_DASHBOARD_CURRENCY = 'USD';
+const FEE_RATE = 0.21;
+const US_DUTY_RATE = 0.15;
 
 const ENV_EXCHANGE_RATES = {
   USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
@@ -64,6 +66,8 @@ const ebayDayToUtcRange = (fromDay, toDay) => {
 };
 
 const sumField = (rows, field) => rows.reduce((acc, row) => acc + toNumber(row[field]), 0);
+const sumLineItemCostPrice = (lineItems = []) =>
+  lineItems.reduce((acc, item) => acc + toNumber(item?.cost_price), 0);
 
 const addAmountByCurrency = (bucket, currency, amount) => {
   const numeric = toNumber(amount);
@@ -155,6 +159,7 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
 
   const exchangeRates = await loadExchangeRatesForUser(userId);
   const { fromTs, toTs } = ebayDayToUtcRange(fromDay, toDay);
+  const excludedStatuses = new Set(['CANCELED', 'FULLY_REFUNDED']);
 
   const { data: orders, error: ordersError } = await supabase
     .from('orders')
@@ -166,6 +171,7 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       'estimated_shipping_cost',
       'shipco_shipping_cost',
       'final_shipping_cost',
+      'status',
       'shipping_status',
       'shipco_synced_at',
       'order_date',
@@ -176,6 +182,10 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       'order_line_items(title,item_image)',
       'subtotal_currency',
       'total_amount_currency',
+      'earnings',
+      'earnings_currency',
+      'earnings_after_pl_fee',
+      'earnings_after_pl_fee_currency',
     ].join(','))
     .eq('user_id', userId)
     .gte('order_date', fromTs.toISOString())
@@ -185,16 +195,19 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
     throw new Error(`Failed to fetch orders: ${ordersError.message}`);
   }
 
-  const activityOrders = orders || [];
+  const rawOrders = orders || [];
+  const activityOrders = rawOrders.filter((order) => !excludedStatuses.has(order.status));
   const resolveCurrency = (order) => order.subtotal_currency || order.total_amount_currency || null;
   const defaultCurrency =
     activityOrders.find((order) => resolveCurrency(order))?.subtotal_currency ||
     activityOrders.find((order) => resolveCurrency(order))?.total_amount_currency ||
     DEFAULT_DASHBOARD_CURRENCY;
   const grossSalesByCurrency = {};
+  const earningsAfterFeeByCurrency = {};
   const ordersByCurrency = {};
   const missingExchangeRates = new Set();
   let grossSalesUsd = 0;
+  let earningsAfterFeeUsd = 0;
   let ordersConvertedCount = 0;
 
   const extractTitleFromLineItems = (lineItems) => {
@@ -247,12 +260,61 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
     return order?.line_items || [];
   };
 
+  const resolveEarningsCurrency = (order) =>
+    normalizeCurrencyCode(order.earnings_after_pl_fee_currency)
+    || normalizeCurrencyCode(order.earnings_currency)
+    || normalizeCurrencyCode(order.subtotal_currency)
+    || normalizeCurrencyCode(order.total_amount_currency)
+    || DEFAULT_DASHBOARD_CURRENCY;
+
+  let earningsAfterFeeJpyTotal = 0;
+  let profitJpyTotal = 0;
+  let profitRateBaseJpyTotal = 0;
+
   const orderDetails = activityOrders.map((order) => {
     const lineItems = getOrderLineItems(order);
-    const price = toNumber(order.subtotal) || toNumber(order.total_amount);
+    const costPriceFallback = sumLineItemCostPrice(lineItems);
+    const price = toNumber(order.total_amount) || toNumber(order.subtotal);
     const currencyRaw = resolveCurrency(order) || defaultCurrency;
     const currency = normalizeCurrencyCode(currencyRaw) || DEFAULT_DASHBOARD_CURRENCY;
+    const earningsAfterFee = toNumber(order.earnings_after_pl_fee) || toNumber(order.earnings);
+    const earningsCurrency = resolveEarningsCurrency(order);
+    const priceUsd = convertAmountToUsd(price, currency, exchangeRates);
+    const earningsAfterFeeUsdForFee = convertAmountToUsd(
+      earningsAfterFee,
+      earningsCurrency,
+      exchangeRates
+    );
+    const feeRateOrder =
+      priceUsd !== null && priceUsd > 0 && earningsAfterFeeUsdForFee !== null
+        ? ((priceUsd - earningsAfterFeeUsdForFee) / priceUsd) * 100
+        : null;
+    const totalAmount = toNumber(order.total_amount) || toNumber(order.subtotal);
+    const totalAmountCurrency =
+      normalizeCurrencyCode(order.total_amount_currency) ||
+      normalizeCurrencyCode(order.subtotal_currency) ||
+      currency;
+    const dutyBaseJpy = convertAmountToJpy(totalAmount, totalAmountCurrency, exchangeRates);
+    const dutyJpy =
+      order.buyer_country_code === 'US' && dutyBaseJpy !== null
+        ? dutyBaseJpy * US_DUTY_RATE
+        : 0;
+    const earningsAfterFeeJpy = convertAmountToJpy(earningsAfterFee, earningsCurrency, exchangeRates);
+    const shippingCostJpy =
+      toNumber(order.final_shipping_cost) ||
+      toNumber(order.shipco_shipping_cost) ||
+      toNumber(order.estimated_shipping_cost);
+    const costPriceJpy = toNumber(order.cost_price) || costPriceFallback;
+    const profitJpy =
+      earningsAfterFeeJpy !== null
+        ? earningsAfterFeeJpy - dutyJpy - shippingCostJpy - costPriceJpy
+        : null;
+    const profitRate =
+      earningsAfterFeeJpy && earningsAfterFeeJpy !== 0 && profitJpy !== null
+        ? (profitJpy / earningsAfterFeeJpy) * 100
+        : null;
     addAmountByCurrency(grossSalesByCurrency, currency, price);
+    addAmountByCurrency(earningsAfterFeeByCurrency, earningsCurrency, earningsAfterFee);
     ordersByCurrency[currency] = (ordersByCurrency[currency] || 0) + 1;
     const converted = convertAmountToUsd(price, currency, exchangeRates);
     if (converted === null) {
@@ -261,15 +323,37 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       grossSalesUsd += converted;
       ordersConvertedCount += 1;
     }
+    if (earningsAfterFee > 0) {
+      const convertedEarnings = convertAmountToUsd(earningsAfterFee, earningsCurrency, exchangeRates);
+      if (convertedEarnings === null) {
+        missingExchangeRates.add(earningsCurrency);
+      } else {
+        earningsAfterFeeUsd += convertedEarnings;
+      }
+    }
+    if (earningsAfterFeeJpy !== null) {
+      earningsAfterFeeJpyTotal += earningsAfterFeeJpy;
+      profitRateBaseJpyTotal += earningsAfterFeeJpy;
+    }
+    if (profitJpy !== null) {
+      profitJpyTotal += profitJpy;
+    }
     return {
       order_no: order.order_no || null,
       title: extractTitleFromLineItems(lineItems),
       image_url: order.image_url || extractImageFromLineItems(lineItems) || null,
       price,
       price_currency: currency,
-      cost_price: toNumber(order.cost_price),
+      earnings_after_fee: earningsAfterFee,
+      earnings_after_fee_currency: earningsCurrency,
+      fee_rate: feeRateOrder,
+      cost_price: toNumber(order.cost_price) || costPriceFallback,
       estimated_shipping_cost: toNumber(order.estimated_shipping_cost),
+      duty_jpy: dutyJpy,
+      profit_jpy: profitJpy,
+      profit_rate: profitRate,
       buyer_country_code: order.buyer_country_code || null,
+      status: order.status || null,
     };
   });
 
@@ -277,7 +361,13 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
   const estShippingTotal = sumField(activityOrders, 'estimated_shipping_cost');
   const estDdpTotal = 0;
   const grossSalesUsdValue = grossSalesUsd;
+  const earningsAfterFeeUsdValue = earningsAfterFeeUsd;
   const aovUsd = ordersConvertedCount > 0 ? grossSalesUsdValue / ordersConvertedCount : 0;
+  const feeRate = grossSalesUsdValue > 0
+    ? (grossSalesUsdValue - earningsAfterFeeUsdValue) / grossSalesUsdValue
+    : 0;
+  const profitRateTotal =
+    profitRateBaseJpyTotal > 0 ? (profitJpyTotal / profitRateBaseJpyTotal) * 100 : 0;
   const aovByCurrency = Object.entries(grossSalesByCurrency).reduce((acc, [currency, amount]) => {
     const count = ordersByCurrency[currency] || 0;
     acc[currency] = count > 0 ? amount / count : 0;
@@ -307,16 +397,29 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
     return ts >= fromTs && ts < toTs;
   });
   const settledProfit = settledOrders.reduce((acc, order) => {
-    const revenue = toNumber(order.subtotal) || toNumber(order.total_amount);
-    const currency = normalizeCurrencyCode(resolveCurrency(order) || defaultCurrency) || DEFAULT_DASHBOARD_CURRENCY;
-    const revenueJpy = convertAmountToJpy(revenue, currency, exchangeRates);
-    if (revenueJpy === null) {
-      missingExchangeRates.add(currency);
+    const earningsAfterFee = toNumber(order.earnings_after_pl_fee) || toNumber(order.earnings);
+    const earningsCurrency = resolveEarningsCurrency(order);
+    const earningsJpy = convertAmountToJpy(earningsAfterFee, earningsCurrency, exchangeRates);
+    if (earningsJpy === null) {
+      missingExchangeRates.add(earningsCurrency);
       return acc;
     }
+    const dutyBase = toNumber(order.total_amount) || toNumber(order.subtotal);
+    const dutyCurrency =
+      normalizeCurrencyCode(order.total_amount_currency) ||
+      normalizeCurrencyCode(order.subtotal_currency) ||
+      normalizeCurrencyCode(resolveCurrency(order) || defaultCurrency) ||
+      DEFAULT_DASHBOARD_CURRENCY;
+    const dutyBaseJpy = convertAmountToJpy(dutyBase, dutyCurrency, exchangeRates);
+    if (dutyBaseJpy === null) {
+      missingExchangeRates.add(dutyCurrency);
+      return acc;
+    }
+    const dutyJpy = order.buyer_country_code === 'US' ? dutyBaseJpy * US_DUTY_RATE : 0;
     return (
       acc +
-      revenueJpy -
+      earningsJpy -
+      dutyJpy -
       toNumber(order.cost_price) -
       (toNumber(order.final_shipping_cost) || toNumber(order.shipco_shipping_cost)) -
       0
@@ -357,6 +460,12 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       gross_sales: grossSalesUsdValue,
       gross_sales_usd: grossSalesUsdValue,
       gross_sales_by_currency: grossSalesByCurrency,
+      earnings_after_fee_usd: earningsAfterFeeUsdValue,
+      earnings_after_fee_by_currency: earningsAfterFeeByCurrency,
+      fee_rate: feeRate,
+      profit_jpy: profitJpyTotal,
+      profit_rate: profitRateTotal,
+      exchange_rate_usd_jpy: exchangeRates.USD || null,
       orders: ordersCount,
       aov: aovUsd,
       aov_usd: aovUsd,
@@ -384,6 +493,12 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       },
       newly_settled_orders: settledOrders.length,
       confirmed_profit: settledProfit,
+      confirmed_profit_notes: {
+        exchange_rate_usd_jpy: exchangeRates.USD || null,
+        fee_rate: feeRate,
+        us_duty_rate: US_DUTY_RATE,
+        us_duty_applies_to: 'US',
+      },
       currency: DEFAULT_DASHBOARD_CURRENCY,
     },
     risk: {
