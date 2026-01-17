@@ -38,7 +38,7 @@ const dashboardRoutes = require('./routes/dashboardRoutes');
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
 const { CronJob } = require('cron');
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 
 // 許可するオリジンのリスト
 const allowedOrigins = [
@@ -134,19 +134,38 @@ app.use('/api/dashboard', dashboardRoutes);
 if (process.env.ENABLE_SCHEDULER === 'true') {
   scheduleInventoryUpdates();
 
+  const runCurl = (label, args) =>
+    new Promise((resolve, reject) => {
+      const curl = spawn('curl', ['-sS', '-o', '/dev/null', '-w', '%{http_code}', ...args], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      curl.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      curl.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      curl.on('error', (err) => {
+        console.error(`${label} failed to spawn:`, err);
+        reject(err);
+      });
+      curl.on('close', (code) => {
+        const status = stdout.trim() || 'unknown';
+        if (code !== 0 || stderr) {
+          console.error(`${label} failed: exit=${code} status=${status} err=${stderr.trim()}`);
+          reject(new Error(`${label} failed`));
+          return;
+        }
+        console.log(`${label} success: status=${status}`);
+        resolve(status);
+      });
+    });
+
   // 深夜1時にsync APIを実行するCronJob
   const runSyncApiJob = new CronJob('0 1 * * *', () => {
-      exec(`curl -X GET "${baseUrl}/api/listings/sync?userId=2"`, (error, stdout, stderr) => {
-          if (error) {
-              console.error(`Error executing sync API: ${error}`);
-              return;
-          }
-          if (stderr) {
-              console.error(`Error output: ${stderr}`);
-              return;
-          }
-          console.log(`Sync API response: ${stdout}`);
-      });
+      runCurl('sync listings', ['-X', 'GET', `${baseUrl}/api/listings/sync?userId=2`]).catch(() => {});
   }, null, true, 'Asia/Tokyo');
 
   // CronJobの開始
@@ -154,17 +173,7 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
 
     // 毎週月曜日の深夜1時にsync-ended-listings APIを実行するCronJob
     const runSyncEndedListingsApiJob = new CronJob('0 1 * * 1', () => {
-      exec(`curl -X GET "${baseUrl}/api/listings/sync-ended-listings?userId=2"`, (error, stdout, stderr) => {
-          if (error) {
-              console.error(`Error executing sync API: ${error}`);
-              return;
-          }
-          if (stderr) {
-              console.error(`Error output: ${stderr}`);
-              return;
-          }
-          console.log(`Sync API response: ${stdout}`);
-      });
+      runCurl('sync ended listings', ['-X', 'GET', `${baseUrl}/api/listings/sync-ended-listings?userId=2`]).catch(() => {});
   }, null, true, 'Asia/Tokyo');
 
   // CronJobの開始
@@ -172,17 +181,7 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
 
   // 毎週月曜日の7時にChatworkのAPIを実行するCronJob
   const runChatworkApiJob = new CronJob('0 7 * * 1', () => {
-    exec(`curl -X GET "${baseUrl}/api/chatwork/last-week-orders/2"`, (error, stdout, stderr) => {
-        if (error) {
-            console.error(`Error executing Chatwork API: ${error}`);
-            return;
-        }
-        if (stderr) {
-            console.error(`Error output: ${stderr}`);
-            return;
-        }
-        console.log(`Chatwork API response: ${stdout}`);
-    });
+    runCurl('chatwork last-week-orders', ['-X', 'GET', `${baseUrl}/api/chatwork/last-week-orders/2`]).catch(() => {});
   }, null, true, 'Asia/Tokyo');
 
   runChatworkApiJob.start();
@@ -190,29 +189,20 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
   // スプレッドシートのデータを同期する
   const runSyncSheetJob = new CronJob('0 6,12,18 * * *', () => {
     console.log('Starting sync-sheet API call...');
-    exec(`curl -X POST "${baseUrl}/api/sheets/sync-sheet" -H "Content-Type: application/json" -d '{"userId": 2}'`, (error, stdout, stderr) => {
-      if (error) {
-        console.error(`Error executing sync-sheet API: ${error}`);
-      }
-      if (stderr) {
-        console.error(`Error output from sync-sheet API: ${stderr}`);
-      }
-      console.log(`sync-sheet API response: ${stdout}`);
-
-      // sync-sheetが完了した後にsync-all-ebay-dataを実行
-      console.log('Starting sync-all-ebay-data API call...');
-      exec(`curl -X GET "${baseUrl}/api/orders/sync-all-ebay-data/user/2"`, (error, stdout, stderr) => {
-        if (error) {
-          console.error(`Error executing sync-all-ebay-data API: ${error}`);
-          return;
-        }
-        if (stderr) {
-          console.error(`Error output from sync-all-ebay-data API: ${stderr}`);
-          return;
-        }
-        console.log(`sync-all-ebay-data API response: ${stdout}`);
-      });
-    });
+    runCurl('sync sheet', [
+      '-X',
+      'POST',
+      `${baseUrl}/api/sheets/sync-sheet`,
+      '-H',
+      'Content-Type: application/json',
+      '-d',
+      '{"userId": 2}',
+    ])
+      .then(() => {
+        console.log('Starting sync-all-ebay-data API call...');
+        return runCurl('sync all ebay data', ['-X', 'GET', `${baseUrl}/api/orders/sync-all-ebay-data/user/2`]);
+      })
+      .catch(() => {});
   }, null, true, 'Asia/Tokyo');
 
   // スケジュールジョブの開始
