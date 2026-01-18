@@ -847,6 +847,7 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     const existingShippingCost = toNumberOrNull(existingData?.shipco_shipping_cost);
     const fallbackShippingCost = toNumberOrNull(shippingCost);
     const existingEstimatedShippingCost = toNumberOrNull(existingData?.estimated_shipping_cost);
+    const existingFinalShippingCost = toNumberOrNull(existingData?.final_shipping_cost);
 
     const existingParcelWeight = toNumberOrNull(existingData?.shipco_parcel_weight);
     const existingParcelWeightUnit =
@@ -954,6 +955,7 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         resolvedEstimatedShippingCost = fallbackShippingCost;
     }
 
+    let resolvedFinalShippingCost = existingFinalShippingCost;
     let resolvedParcelWeight = existingParcelWeight;
     let resolvedParcelWeightUnit = existingParcelWeightUnit;
     let resolvedParcelLength = existingParcelLength;
@@ -994,6 +996,24 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         shipcoDataApplied = true;
     }
 
+    const normalizedCarrier =
+        typeof resolvedShippingCarrier === 'string'
+            ? resolvedShippingCarrier.toLowerCase().replace(/[\s-_]/g, '')
+            : null;
+    const isJapanPostCarrier = normalizedCarrier ? normalizedCarrier.includes('japanpost') : false;
+    if (
+        resolvedFinalShippingCost === null &&
+        isJapanPostCarrier &&
+        shipcoRate !== null &&
+        isShipcoJpy
+    ) {
+        resolvedFinalShippingCost = shipcoRate;
+        shipcoDataApplied = true;
+        console.info(
+            `[orderService] Final shipping cost set from Ship&Co for Japan Post order ${order.orderId}: ${shipcoRate} JPY`
+        );
+    }
+
     const shipcoSyncedAt =
         shipcoDataApplied
             ? new Date().toISOString()
@@ -1022,6 +1042,7 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         earnings_after_pl_fee: earningsAfterPlFee,
         shipco_shipping_cost: resolvedShippingCost,
         estimated_shipping_cost: resolvedEstimatedShippingCost,
+        final_shipping_cost: resolvedFinalShippingCost,
         shipping_tracking_number:
             shippingTrackingNumber || (existingData ? existingData.shipping_tracking_number : null),
         shipping_carrier: resolvedShippingCarrier,

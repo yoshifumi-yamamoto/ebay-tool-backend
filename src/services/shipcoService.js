@@ -142,18 +142,43 @@ const extractDeliveryRateFromShipment = (shipment = {}) => {
 
 const extractCarrierFromShipment = (shipment = {}) => {
     const delivery = shipment?.delivery;
-    if (!delivery || typeof delivery !== 'object') {
-        return null;
-    }
-    const candidate =
-        delivery.carrier ||
-        delivery.carrier_code ||
-        delivery.carrierCode ||
-        delivery.service ||
-        delivery.service_code ||
-        delivery.serviceCode ||
-        null;
-    return typeof candidate === 'string' ? candidate.trim() : candidate ? String(candidate).trim() : null;
+    const deliveryCandidate =
+        delivery && typeof delivery === 'object'
+            ? delivery.carrier ||
+              delivery.carrier_code ||
+              delivery.carrierCode ||
+              delivery.carrier_name ||
+              delivery.carrierName ||
+              delivery.service ||
+              delivery.service_code ||
+              delivery.serviceCode ||
+              delivery.service_name ||
+              delivery.serviceName ||
+              null
+            : null;
+    const shipmentCandidate =
+        shipment && typeof shipment === 'object'
+            ? shipment.carrier ||
+              shipment.carrier_code ||
+              shipment.carrierCode ||
+              shipment.carrier_name ||
+              shipment.carrierName ||
+              shipment.service ||
+              shipment.service_code ||
+              shipment.serviceCode ||
+              shipment.service_name ||
+              shipment.serviceName ||
+              shipment.courier ||
+              shipment.courier_name ||
+              shipment.courierName ||
+              null
+            : null;
+    const candidate = deliveryCandidate || shipmentCandidate;
+    return typeof candidate === 'string'
+        ? candidate.trim()
+        : candidate
+            ? String(candidate).trim()
+            : null;
 };
 
 const toNumberOrNull = (value) => {
@@ -285,6 +310,14 @@ const fetchShipmentDetailsByReference = async (reference) => {
             console.info(
                 `[shipcoService] Extracted carrier for reference ${reference}:`,
                 carrier
+            );
+        } else {
+            const deliveryKeys = targetShipment?.delivery
+                ? Object.keys(targetShipment.delivery)
+                : [];
+            const shipmentKeys = targetShipment ? Object.keys(targetShipment) : [];
+            console.warn(
+                `[shipcoService] No carrier found for reference ${reference}. delivery keys=${deliveryKeys.join(',') || 'none'} shipment keys=${shipmentKeys.join(',') || 'none'}`
             );
         }
 
