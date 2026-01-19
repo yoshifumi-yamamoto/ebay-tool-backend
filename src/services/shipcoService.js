@@ -346,6 +346,21 @@ exports.fetchRates = async (payload) => {
     try {
         console.info('[shipcoService] rates payload', payload);
         const response = await client.post('/rates', payload);
+        console.info('[shipcoService] rates response', response.data);
+        const ratesArray = Array.isArray(response.data)
+            ? response.data
+            : Array.isArray(response.data?.rates)
+                ? response.data.rates
+                : [];
+        const errorEntries = ratesArray.filter((rate) => Array.isArray(rate?.errors) && rate.errors.length > 0);
+        if (errorEntries.length > 0) {
+            errorEntries.forEach((entry, index) => {
+                console.warn(
+                    `[shipcoService] rates response error ${index + 1}:`,
+                    entry.errors
+                );
+            });
+        }
         return response.data || [];
     } catch (error) {
         logError('shipcoService.fetchRates', error);

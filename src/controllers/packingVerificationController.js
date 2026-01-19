@@ -1,7 +1,17 @@
 const { fetchPackingVerification } = require('../services/packingVerificationService');
 
 exports.getPackingVerification = async (req, res) => {
-  const { user_id, start_date, end_date, limit, offset, ebay_user_id, shipping_carrier } = req.query;
+  const {
+    user_id,
+    start_date,
+    end_date,
+    limit,
+    offset,
+    ebay_user_id,
+    shipping_carrier,
+    order_no,
+    tracking_number,
+  } = req.query;
 
   try {
     const result = await fetchPackingVerification({
@@ -12,6 +22,8 @@ exports.getPackingVerification = async (req, res) => {
       offset,
       ebay_user_id,
       shipping_carrier,
+      order_no,
+      tracking_number,
     });
     res.json(result);
   } catch (error) {

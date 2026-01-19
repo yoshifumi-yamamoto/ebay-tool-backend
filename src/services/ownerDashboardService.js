@@ -179,7 +179,7 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       'buyer_country_code',
       'image_url',
       'line_items',
-      'order_line_items(title,item_image)',
+      'order_line_items(title,item_image,cost_price)',
       'subtotal_currency',
       'total_amount_currency',
       'earnings',

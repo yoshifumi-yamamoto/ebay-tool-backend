@@ -129,8 +129,10 @@ exports.estimateShipcoRates = async (req, res) => {
         return res.status(400).json({ error: 'user_id is required' });
     }
     try {
-        const rates = await orderShipcoService.estimateRates(orderNo, userId, req.body || {});
-        return res.status(200).json({ rates });
+        const result = await orderShipcoService.estimateRates(orderNo, userId, req.body || {});
+        const rates = Array.isArray(result?.rates) ? result.rates : [];
+        const errors = Array.isArray(result?.errors) ? result.errors : [];
+        return res.status(200).json({ rates, errors });
     } catch (error) {
         console.error('Failed to estimate Ship&Co rates:', error.message);
         return res.status(500).json({ error: 'Failed to estimate Ship&Co rates' });

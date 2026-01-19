@@ -46,7 +46,11 @@ const buildDefaultCustoms = (order = {}, setup = {}) => {
         ? order.earnings
         : 1;
   return {
-    customs: { content_type: 'MERCHANDISE' },
+    customs: {
+      content_type: 'MERCHANDISE',
+      duty_paid: Boolean(setup?.ddp),
+      ioss_number: setup?.ioss_number || null,
+    },
     products: [
       {
         name: 'Merchandise',
@@ -54,6 +58,7 @@ const buildDefaultCustoms = (order = {}, setup = {}) => {
         price: amount,
         origin_country: 'JP',
         currency,
+        hs_code: null,
       },
     ],
   };

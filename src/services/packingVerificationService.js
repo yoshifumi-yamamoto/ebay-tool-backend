@@ -17,6 +17,8 @@ exports.fetchPackingVerification = async (filters = {}) => {
     offset = 0,
     ebay_user_id,
     shipping_carrier,
+    order_no,
+    tracking_number,
   } = filters;
 
   if (!user_id) {
@@ -63,6 +65,8 @@ exports.fetchPackingVerification = async (filters = {}) => {
   if (end_date) query = query.lte('order_date', end_date);
   if (ebay_user_id) query = query.eq('ebay_user_id', ebay_user_id);
   if (shipping_carrier) query = query.eq('shipping_carrier', shipping_carrier);
+  if (order_no) query = query.ilike('order_no', `%${order_no}%`);
+  if (tracking_number) query = query.ilike('shipping_tracking_number', `%${tracking_number}%`);
 
   const { data, error, count } = await query;
   if (error) {

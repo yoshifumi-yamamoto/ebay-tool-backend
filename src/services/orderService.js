@@ -1,4 +1,5 @@
 const supabase = require('../supabaseClient');
+const axios = require('axios');
 const { fetchEbayAccountTokens, refreshEbayToken } = require("./accountService")
 const { fetchItemDetails } = require("./itemService")
 const { upsertBuyer } = require('./buyerService');
@@ -334,7 +335,7 @@ async function fetchAndUpsertBuyer(order, userId) {
  * @param {Object} itemsMap - itemsテーブルからの商品のマップ
  * @returns {Array} - 処理されたラインアイテム
  */
-async function fetchAndProcessLineItems(order, accessToken, existingImages, itemsMap) {
+async function fetchAndProcessLineItems(order, accessToken, existingImages, itemsMap, existingLineItemData = {}) {
     return await Promise.all(order.lineItems.map(async (item) => {
         let itemImage = existingImages[item.legacyItemId];
         if (!itemImage) {
@@ -352,11 +353,13 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
         }
 
         const itemData = itemsMap[item.legacyItemId];
+        const existingLineItem = existingLineItemData[item.lineItemId] || {};
+        const existingCostPrice = existingLineItem?.cost_price;
         return {
             ...item,
             itemImage,
             stocking_url: itemData ? itemData.stocking_url : null,
-            cost_price: itemData ? itemData.cost_price : null
+            cost_price: existingCostPrice != null ? existingCostPrice : itemData ? itemData.cost_price : null
         };
     }));
 }
@@ -1192,7 +1195,13 @@ async function saveOrdersAndBuyers(userId) {
 
                     const lineItemFulfillmentStatus = order.lineItems?.[0]?.lineItemFulfillmentStatus || 'NOT_STARTED';
 
-                    const lineItems = await fetchAndProcessLineItems(order, accessToken, existingImages, itemsMap);
+                    const lineItems = await fetchAndProcessLineItems(
+                        order,
+                        accessToken,
+                        existingImages,
+                        itemsMap,
+                        existingLineItemData
+                    );
 
                     const primaryLineItemId = lineItems[0]?.lineItemId;
                     const primaryLegacyItemId = lineItems[0]?.legacyItemId;
@@ -1351,8 +1360,28 @@ async function fetchRelevantOrders(userId) {
     }
 
     const exchangeRates = await loadUserExchangeRates(userId);
-    return (data || [])
+    const orders = data || [];
+    const orderNos = orders.map((order) => order.order_no).filter(Boolean);
+    let groupLabelMap = {};
+    if (orderNos.length > 0) {
+        const { data: groupLinks, error: groupError } = await supabase
+            .from('shipment_group_orders')
+            .select('order_no, shipment_groups(label_url, tracking_number, shipping_carrier)')
+            .in('order_no', orderNos);
+        if (!groupError && Array.isArray(groupLinks)) {
+            groupLabelMap = groupLinks.reduce((acc, link) => {
+                if (!link?.order_no) return acc;
+                acc[link.order_no] = link.shipment_groups || null;
+                return acc;
+            }, {});
+        }
+    }
+    return orders
         .map(attachNormalizedLineItemsToOrder)
+        .map((order) => ({
+            ...order,
+            shipment_group: groupLabelMap[order.order_no] || null,
+        }))
         .map((order) => attachFinancialsToOrder(order, exchangeRates));
 }
 
