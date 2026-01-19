@@ -207,6 +207,34 @@ exports.getOrdersByUserId = async (req, res) => {
     }
 };
 
+// 注文番号で単一注文を取得
+exports.getOrderByOrderNo = async (req, res) => {
+    const userId = req.query.userId;
+    const orderNo = req.query.orderNo || req.query.order_no;
+    if (!userId || !orderNo) {
+        return res.status(400).json({ error: 'userId and orderNo are required' });
+    }
+    try {
+        const order = await orderService.fetchOrderByOrderNo(userId, orderNo);
+        if (!order) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+        return res.json(order);
+    } catch (error) {
+        await logSystemError({
+            error_code: 'ORDER_FETCH_BY_NO_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: true,
+            user_id: userId,
+            payload_summary: { orderNo },
+        });
+        res.status(500).json({ error: error.message });
+    }
+};
+
 // キャンセル/返金済みの注文一覧
 exports.getArchivedOrdersByUserId = async (req, res) => {
     const userId = req.query.userId;

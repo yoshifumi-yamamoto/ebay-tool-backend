@@ -1385,6 +1385,42 @@ async function fetchRelevantOrders(userId) {
         .map((order) => attachFinancialsToOrder(order, exchangeRates));
 }
 
+async function fetchOrderByOrderNo(userId, orderNo) {
+    if (!userId || !orderNo) {
+        throw new Error('userId and orderNo are required');
+    }
+    const { data, error } = await supabase
+        .from('orders')
+        .select('*, order_line_items(*)')
+        .eq('user_id', userId)
+        .eq('order_no', orderNo)
+        .maybeSingle();
+    if (error || !data) {
+        return null;
+    }
+    const exchangeRates = await loadUserExchangeRates(userId);
+    const orderNos = [data.order_no];
+    let groupLabelMap = {};
+    const { data: groupLinks, error: groupError } = await supabase
+        .from('shipment_group_orders')
+        .select('order_no, shipment_groups(label_url, tracking_number, shipping_carrier)')
+        .in('order_no', orderNos);
+    if (!groupError && Array.isArray(groupLinks)) {
+        groupLabelMap = groupLinks.reduce((acc, link) => {
+            if (!link?.order_no) return acc;
+            acc[link.order_no] = link.shipment_groups || null;
+            return acc;
+        }, {});
+    }
+    return attachFinancialsToOrder(
+        {
+            ...attachNormalizedLineItemsToOrder(data),
+            shipment_group: groupLabelMap[data.order_no] || null,
+        },
+        exchangeRates
+    );
+}
+
 async function fetchArchivedOrders(userId, statusFilter = null) {
     let query = supabase
         .from('orders')
@@ -1647,6 +1683,7 @@ module.exports = {
     saveOrdersAndBuyers,
     getOrdersByUserId,
     fetchRelevantOrders,
+    fetchOrderByOrderNo,
     fetchArchivedOrders,
     updateOrder,
     fetchLastWeekOrders,

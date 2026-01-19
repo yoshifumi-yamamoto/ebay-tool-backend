@@ -28,12 +28,19 @@ function mapReturnToCaseRow(ret, accountId) {
   const item = (ret?.returnItems || [])[0] || {};
   const openedAt = ret?.creationDate || ret?.creationDate?.value || ret?.creationDate?.date || null;
   const resolutionDue = ret?.responseDue || ret?.buyerEscalationEligibilityDate || null;
+  const orderNo =
+    ret?.legacyOrderId ||
+    ret?.orderId?.orderId ||
+    ret?.orderId ||
+    item?.legacyOrderId ||
+    null;
 
   return {
     ebay_case_id: String(ret.returnId?.id || ret.returnId || ''),
     case_type: 'RETURN',
     status: ret?.status || 'UNKNOWN',
     account_id: accountId,
+    order_no: orderNo,
     order_id: null,
     buyer_id: null,
     reason: ret?.reason || item?.returnReason || null,
@@ -54,12 +61,18 @@ function mapInquiryToCaseRow(inquiry, accountId) {
   const refund = inquiry?.claimAmount || {};
   const openedAt = inquiry?.openDate || inquiry?.creationDate || null;
   const resolutionDue = inquiry?.respondByDate || inquiry?.escalationEligibilityDate || null;
+  const orderNo =
+    inquiry?.legacyOrderId ||
+    inquiry?.orderId?.orderId ||
+    inquiry?.orderId ||
+    null;
 
   return {
     ebay_case_id: String(inquiry.inquiryId?.id || inquiry.inquiryId || ''),
     case_type: 'INR',
     status: inquiry?.status || 'UNKNOWN',
     account_id: accountId,
+    order_no: orderNo,
     order_id: null,
     buyer_id: null,
     reason: inquiry?.inquiryReason || inquiry?.itemNotReceivedReason || null,
