@@ -53,7 +53,9 @@ exports.fetchPackingVerification = async (filters = {}) => {
       shipco_parcel_height,
       shipco_parcel_dimension_unit,
       order_line_items (
-        legacy_item_id
+        legacy_item_id,
+        title,
+        item_image
       )
     `, { count: 'exact' })
     .eq('user_id', user_id)
@@ -145,6 +147,8 @@ exports.fetchPackingVerification = async (filters = {}) => {
       item_title: (() => {
         const lineItems = row.order_line_items || [];
         for (const item of lineItems) {
+          const directTitle = item?.title;
+          if (directTitle) return directTitle;
           const legacyId = item?.legacy_item_id;
           if (!legacyId) continue;
           const title = itemsMap[legacyId]?.item_title;
@@ -155,6 +159,8 @@ exports.fetchPackingVerification = async (filters = {}) => {
       primary_image_url: (() => {
         const lineItems = row.order_line_items || [];
         for (const item of lineItems) {
+          const directImage = item?.item_image;
+          if (directImage) return directImage;
           const legacyId = item?.legacy_item_id;
           if (!legacyId) continue;
           const url = itemsMap[legacyId]?.primary_image_url;
