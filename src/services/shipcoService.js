@@ -380,7 +380,7 @@ exports.createShipment = async (payload) => {
         return response.data;
     } catch (error) {
         logError('shipcoService.createShipment', error);
-        console.error('[shipcoService] Failed to create shipment:', error?.message || error);
+        console.error('[shipcoService] Failed to create shipment:', error?.response?.data || error?.message || error);
         throw error;
     }
 };
