@@ -36,7 +36,7 @@ const fetchGroupOrders = async (groupId, userId) => {
     }
     const { data: orders, error: ordersError } = await supabase
         .from('orders')
-        .select('order_no, ship_to, subtotal, subtotal_currency, total_amount_currency, earnings, earnings_currency, shipco_parcel_weight, shipco_parcel_length, shipco_parcel_width, shipco_parcel_height, estimated_parcel_weight, estimated_parcel_length, estimated_parcel_width, estimated_parcel_height')
+        .select('order_no, ship_to, subtotal, subtotal_currency, total_amount_currency, earnings, earnings_currency, shipco_parcel_weight, shipco_parcel_length, shipco_parcel_width, shipco_parcel_height, estimated_parcel_weight, estimated_parcel_length, estimated_parcel_width, estimated_parcel_height, order_line_items(title, quantity)')
         .in('order_no', orderNos);
     if (ordersError) {
         throw new Error(`Failed to fetch orders: ${ordersError.message}`);

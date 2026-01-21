@@ -45,6 +45,16 @@ const buildDefaultCustoms = (order = {}, setup = {}) => {
       : typeof order.earnings === 'number'
         ? order.earnings
         : 1;
+  const lineItems = Array.isArray(order.order_line_items) ? order.order_line_items : [];
+  const lineTitles = lineItems.map((item) => item?.title).filter(Boolean);
+  const totalQuantity =
+    lineItems.reduce((sum, item) => sum + (Number(item?.quantity) || 0), 0) || 1;
+  let productName = 'Merchandise';
+  if (lineTitles.length === 1) {
+    productName = lineTitles[0];
+  } else if (lineTitles.length > 1) {
+    productName = `${lineTitles[0]} +${lineTitles.length - 1}`;
+  }
   return {
     customs: {
       content_type: 'MERCHANDISE',
@@ -53,8 +63,8 @@ const buildDefaultCustoms = (order = {}, setup = {}) => {
     },
     products: [
       {
-        name: 'Merchandise',
-        quantity: 1,
+        name: productName,
+        quantity: totalQuantity,
         price: amount,
         origin_country: 'JP',
         currency,
