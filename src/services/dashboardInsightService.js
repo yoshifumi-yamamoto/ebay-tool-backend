@@ -358,7 +358,12 @@ const generateTodayAiInsight = async ({ userId, date }) => {
     outputInsight = result.insight;
     model = result.model;
     usage = result.usage;
-    return outputInsight;
+    return {
+      insight: outputInsight,
+      input_metrics: inputMetrics,
+      model,
+      usage,
+    };
   } catch (error) {
     const status = error?.response?.status;
     const detail = error?.response?.data;
@@ -381,6 +386,30 @@ const generateTodayAiInsight = async ({ userId, date }) => {
   }
 };
 
+const fetchAiInsightHistory = async ({ userId, fromDay, toDay, limit = 30 }) => {
+  let query = supabase
+    .from('ai_insights')
+    .select('date, output_insight_json, model, usage, error_message, created_at')
+    .eq('user_id', userId)
+    .order('date', { ascending: false })
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (fromDay) {
+    query = query.gte('date', fromDay);
+  }
+  if (toDay) {
+    query = query.lte('date', toDay);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`Failed to fetch AI insight history: ${error.message}`);
+  }
+  return data || [];
+};
+
 module.exports = {
   generateTodayAiInsight,
+  fetchAiInsightHistory,
 };

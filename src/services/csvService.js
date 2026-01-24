@@ -492,30 +492,42 @@ async function processFedexRows(rows, sourceFileName) {
 
 async function processDhlRows(rows, sourceFileName) {
     let processed = 0;
-    for (const row of rows) {
+    const grouped = new Map();
+    rows.forEach((row) => {
         const invoiceNumber = row['Invoice Number'];
         const awb = row['Shipment Number'];
         if (!invoiceNumber || !awb) {
-            continue;
+            return;
         }
+        const key = `${invoiceNumber}::${awb}`;
+        if (!grouped.has(key)) {
+            grouped.set(key, []);
+        }
+        grouped.get(key).push(row);
+    });
+
+    for (const [key, groupRows] of grouped.entries()) {
+        const [invoiceNumber, awb] = key.split('::');
+        const firstRow = groupRows[0];
         const invoiceId = await upsertCarrierInvoice({
             carrier: 'DHL',
             invoice_number: invoiceNumber,
-            invoice_date: normalizeDate(row['Invoice Date']),
-            currency: row['Currency'] || null,
-            billing_account: row['Billing Account'] || null,
+            invoice_date: normalizeDate(firstRow['Invoice Date']),
+            currency: firstRow['Currency'] || null,
+            billing_account: firstRow['Billing Account'] || null,
             source_file_name: sourceFileName,
         });
         const shipmentId = await upsertCarrierShipment({
             invoice_id: invoiceId,
             awb_number: awb,
-            shipment_date: normalizeDate(row['Shipment Date']),
-            reference_1: row['Shipment Reference 1'] || null,
-            shipment_total: normalizeAmount(row['Total amount (excl. VAT)']),
+            shipment_date: normalizeDate(firstRow['Shipment Date']),
+            reference_1: firstRow['Shipment Reference 1'] || null,
+            shipment_total: normalizeAmount(firstRow['Total amount (excl. VAT)']),
         });
 
         const charges = [];
-        const pushCharge = (name, amount, lineNo, code = null, taxCode = null) => {
+        let lineNo = 1;
+        const pushCharge = (name, amount, code = null, taxCode = null) => {
             const parsed = normalizeAmount(amount);
             if (parsed === null || parsed === 0) {
                 return;
@@ -528,22 +540,29 @@ async function processDhlRows(rows, sourceFileName) {
                 charge_code: code,
                 line_no: lineNo,
             });
+            lineNo += 1;
         };
 
-        pushCharge('Weight Charge', row['Weight Charge'], 1, null, row['Tax Code']);
-        pushCharge('Invoice Fee', row['Invoice Fee'], 2, null, row['Tax Code']);
-        pushCharge(row['Other Charges 1'] || 'Other Charges 1', row['Other Charges 1 Amount'], 3);
-        pushCharge(row['Other Charges 2'] || 'Other Charges 2', row['Other Charges 2 Amount'], 4);
-        pushCharge(row['Discount 1'] || 'Discount 1', row['Discount 1 Amount'], 5);
-        pushCharge(row['Discount 2'] || 'Discount 2', row['Discount 2 Amount'], 6);
-        pushCharge(row['Discount 3'] || 'Discount 3', row['Discount 3 Amount'], 7);
+        groupRows.forEach((row) => {
+            const product = String(row['Product'] || '').toLowerCase();
+            if (product.includes('duties') || product.includes('tax')) {
+                pushCharge(row['Product Name'] || 'DUTIES & TAXES', row['Total amount (excl. VAT)'], row['Product'], row['Tax Code']);
+            }
+            pushCharge('Weight Charge', row['Weight Charge'], null, row['Tax Code']);
+            pushCharge('Invoice Fee', row['Invoice Fee'], null, row['Tax Code']);
+            pushCharge(row['Other Charges 1'] || 'Other Charges 1', row['Other Charges 1 Amount']);
+            pushCharge(row['Other Charges 2'] || 'Other Charges 2', row['Other Charges 2 Amount']);
+            pushCharge(row['Discount 1'] || 'Discount 1', row['Discount 1 Amount']);
+            pushCharge(row['Discount 2'] || 'Discount 2', row['Discount 2 Amount']);
+            pushCharge(row['Discount 3'] || 'Discount 3', row['Discount 3 Amount']);
 
-        for (let i = 1; i <= 9; i += 1) {
-            const code = row[`XC${i} Code`];
-            const name = row[`XC${i} Name`] || `XC${i}`;
-            const amount = row[`XC${i} Charge`];
-            pushCharge(name, amount, 10 + i, code, row[`XC${i} Tax Code`]);
-        }
+            for (let i = 1; i <= 9; i += 1) {
+                const code = row[`XC${i} Code`];
+                const name = row[`XC${i} Name`] || `XC${i}`;
+                const amount = row[`XC${i} Charge`];
+                pushCharge(name, amount, code, row[`XC${i} Tax Code`]);
+            }
+        });
 
         await replaceCarrierCharges(shipmentId, charges);
         processed += 1;

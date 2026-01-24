@@ -185,3 +185,77 @@ exports.fetchPackingVerification = async (filters = {}) => {
     total: count || 0,
   };
 };
+
+exports.fetchCarrierRates = async (filters = {}) => {
+  const {
+    limit = 200,
+    offset = 0,
+    carrier,
+    service,
+    destination_scope,
+    zone,
+    is_active,
+    include_meta = false,
+  } = filters;
+
+  const safeLimit = Number.isFinite(Number(limit)) ? Math.min(Number(limit), 500) : 200;
+  const safeOffset = Number.isFinite(Number(offset)) ? Math.max(Number(offset), 0) : 0;
+
+  let query = supabase
+    .from('shipping_rates')
+    .select('*', { count: 'exact' })
+    .order('last_synced_at', { ascending: false })
+    .order('created_at', { ascending: false })
+    .range(safeOffset, safeOffset + safeLimit - 1);
+
+  if (carrier) query = query.eq('carrier', carrier);
+  if (service) query = query.ilike('service_code', `%${service}%`);
+  if (destination_scope) query = query.eq('destination_scope', destination_scope);
+  if (zone !== undefined && zone !== null && zone !== '') {
+    query = query.eq('zone', Number(zone));
+  }
+  if (is_active !== undefined && is_active !== null && is_active !== '') {
+    query = query.eq('is_active', String(is_active) === 'true');
+  }
+
+  const { data, error, count } = await query;
+  if (error) {
+    console.error('Failed to fetch carrier rates:', error.message);
+    throw error;
+  }
+
+  let meta = {};
+  if (include_meta) {
+    let servicesQuery = supabase
+      .from('shipping_rates')
+      .select('service_code, service_name')
+      .order('service_code', { ascending: true });
+
+    if (carrier) servicesQuery = servicesQuery.eq('carrier', carrier);
+    if (destination_scope) servicesQuery = servicesQuery.eq('destination_scope', destination_scope);
+    if (zone !== undefined && zone !== null && zone !== '') {
+      servicesQuery = servicesQuery.eq('zone', Number(zone));
+    }
+    if (is_active !== undefined && is_active !== null && is_active !== '') {
+      servicesQuery = servicesQuery.eq('is_active', String(is_active) === 'true');
+    }
+
+    const { data: serviceRows, error: serviceError } = await servicesQuery;
+    if (serviceError) {
+      console.error('Failed to fetch carrier rate services:', serviceError.message);
+    } else {
+      const serviceMap = new Map();
+      (serviceRows || []).forEach((row) => {
+        if (!row?.service_code || serviceMap.has(row.service_code)) return;
+        serviceMap.set(row.service_code, row.service_name || row.service_code);
+      });
+      meta.services = Array.from(serviceMap.entries()).map(([value, label]) => ({ value, label }));
+    }
+  }
+
+  return {
+    data: data || [],
+    total: count || 0,
+    meta,
+  };
+};
