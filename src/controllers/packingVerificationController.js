@@ -1,4 +1,5 @@
 const { fetchPackingVerification, fetchCarrierRates } = require('../services/packingVerificationService');
+const { syncCarrierRatesForUser } = require('../services/shipcoRateSyncService');
 
 exports.getPackingVerification = async (req, res) => {
   const {
@@ -53,11 +54,18 @@ exports.getCarrierRates = async (req, res) => {
   }
 };
 
-exports.syncCarrierRates = async (_req, res) => {
+exports.syncCarrierRates = async (req, res) => {
+  const { user_id, weights_g } = req.body || {};
+  const numericUserId = Number(user_id);
+  if (!Number.isFinite(numericUserId)) {
+    res.status(400).json({ message: 'user_id is required' });
+    return;
+  }
   try {
-    res.status(200).json({ message: 'Carrier rate sync queued' });
+    const result = await syncCarrierRatesForUser(numericUserId, Array.isArray(weights_g) ? weights_g : []);
+    res.status(200).json({ message: 'Carrier rate sync completed', ...result });
   } catch (error) {
     console.error('Failed to enqueue carrier rate sync:', error.message);
-    res.status(500).json({ message: 'Failed to enqueue carrier rate sync' });
+    res.status(500).json({ message: 'Failed to sync carrier rates' });
   }
 };

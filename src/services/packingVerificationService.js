@@ -251,6 +251,27 @@ exports.fetchCarrierRates = async (filters = {}) => {
       });
       meta.services = Array.from(serviceMap.entries()).map(([value, label]) => ({ value, label }));
     }
+
+    let carriersQuery = supabase
+      .from('shipping_rates')
+      .select('carrier')
+      .order('carrier', { ascending: true });
+    if (service) carriersQuery = carriersQuery.ilike('service_code', `%${service}%`);
+    if (destination_scope) carriersQuery = carriersQuery.eq('destination_scope', destination_scope);
+    if (zone !== undefined && zone !== null && zone !== '') {
+      carriersQuery = carriersQuery.eq('zone', Number(zone));
+    }
+    if (is_active !== undefined && is_active !== null && is_active !== '') {
+      carriersQuery = carriersQuery.eq('is_active', String(is_active) === 'true');
+    }
+    const { data: carrierRows, error: carrierError } = await carriersQuery;
+    if (carrierError) {
+      console.error('Failed to fetch carrier rate carriers:', carrierError.message);
+    } else {
+      meta.carriers = Array.from(
+        new Set((carrierRows || []).map((row) => row?.carrier).filter(Boolean))
+      );
+    }
   }
 
   return {
