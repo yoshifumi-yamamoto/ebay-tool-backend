@@ -127,15 +127,29 @@ async function syncSheetToSupabase(req, res) {
                 const ids = [];
                 const pageSize = 1000;
                 let offset = 0;
+                const retryLimit = 3;
+                const retryDelayMs = 500;
                 for (let page = 0; page < 200; page += 1) {
-                    const { data, error } = await supabase
-                        .from('items')
-                        .select('ebay_item_id')
-                        .eq('user_id', userId)
-                        .eq('ebay_user_id', ebay_user_id)
-                        .eq('listing_status', 'ACTIVE')
-                        .order('ebay_item_id', { ascending: true })
-                        .range(offset, offset + pageSize - 1);
+                    let data = null;
+                    let error = null;
+                    for (let attempt = 1; attempt <= retryLimit; attempt += 1) {
+                        const response = await supabase
+                            .from('items')
+                            .select('ebay_item_id')
+                            .eq('user_id', userId)
+                            .eq('ebay_user_id', ebay_user_id)
+                            .eq('listing_status', 'ACTIVE')
+                            .order('ebay_item_id', { ascending: true })
+                            .range(offset, offset + pageSize - 1);
+                        data = response?.data || null;
+                        error = response?.error || null;
+                        if (!error) {
+                            break;
+                        }
+                        if (attempt < retryLimit) {
+                            await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                        }
+                    }
                     if (error) {
                         throw new Error(`Failed to fetch active items: ${error.message}`);
                     }

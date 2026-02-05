@@ -266,6 +266,7 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                 : item.PictureDetails?.PictureURL;
             return {
                 legacyItemId: getTextValue(item.ItemID),
+                sku: getTextValue(item?.SKU),
                 status: (item?.SellingStatus?.ListingStatus || 'UNKNOWN').toUpperCase(),
                 category_id: getTextValue(item?.PrimaryCategory?.CategoryID),
                 category_name: getTextValue(item?.PrimaryCategory?.CategoryName),
@@ -323,6 +324,7 @@ async function updateItemsTable(listings, userId, ebayUserId) {
     for (const listing of listings) {
         const {
             legacyItemId,
+            sku,
             item_title,
             category_id,
             category_name,
@@ -356,6 +358,7 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                             category_name,
                             category_path,
                             item_title,
+                            sku,
                             current_price_value,
                             current_price_currency,
                             primary_image_url,
@@ -374,6 +377,7 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                             ebay_item_id: legacyItemId,
                             user_id: userId,
                             item_title,
+                            sku,
                             ebay_user_id: ebayUserId,
                             last_synced_at: syncedAt,
                             category_id,

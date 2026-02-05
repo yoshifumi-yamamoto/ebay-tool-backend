@@ -5,6 +5,7 @@ const { attachNormalizedLineItemsToOrder } = require('./orderService');
 const DEFAULT_ORDER_CURRENCY = 'USD';
 const DEFAULT_PAYOUT_CURRENCY = 'USD';
 const INCENTIVE_RATE = 0.1;
+const US_DUTY_RATE = 0.15;
 
 const ENV_EXCHANGE_RATES = {
   USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
@@ -110,9 +111,16 @@ const calculateOrderFinancials = (order, exchangeRates) => {
   const exchangeRate = getExchangeRateToJPY(earningsAfterFeeCurrency, exchangeRates);
   const earningsAfterFeeJpy =
     exchangeRate !== null ? earningsAfterFee * exchangeRate : null;
+  const totalAmountRate = getExchangeRateToJPY(totalAmountCurrency, exchangeRates);
+  const dutyBaseJpy =
+    totalAmountRate !== null ? totalAmount * totalAmountRate : null;
+  const dutyJpy =
+    order.buyer_country_code === 'US' && dutyBaseJpy !== null
+      ? dutyBaseJpy * US_DUTY_RATE
+      : 0;
   const profitJpy =
     earningsAfterFeeJpy !== null
-      ? earningsAfterFeeJpy - shippingCostJpy - costPriceJpy
+      ? earningsAfterFeeJpy - dutyJpy - shippingCostJpy - costPriceJpy
       : null;
   const profitMargin =
     earningsAfterFeeJpy && earningsAfterFeeJpy !== 0
@@ -132,6 +140,7 @@ const calculateOrderFinancials = (order, exchangeRates) => {
     earningsAfterFeeCurrency,
     shippingCostJpy,
     costPriceJpy,
+    dutyJpy,
     earningsAfterFeeJpy,
     profitJpy,
     profitMargin,
@@ -255,6 +264,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
           calculated_profit_margin: financials.profitMargin,
           calculated_cost_price_jpy: financials.costPriceJpy,
           calculated_shipping_cost_jpy: financials.shippingCostJpy,
+          calculated_duty_jpy: financials.dutyJpy,
           calculated_earnings_after_fee_jpy: financials.earningsAfterFeeJpy,
           calculated_exchange_rate_applied: financials.exchangeRateApplied,
           calculated_exchange_rate_currency: financials.exchangeRateCurrency,

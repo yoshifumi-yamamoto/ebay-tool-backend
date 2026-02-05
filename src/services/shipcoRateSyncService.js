@@ -106,7 +106,7 @@ async function syncCarrierRatesForUser(userId, weightsG = []) {
   const weightList =
     weightsG.length > 0
       ? weightsG
-      : Array.from({ length: 60 }, (_value, index) => (index + 1) * 500);
+      : Array.from({ length: 100 }, (_value, index) => (index + 1) * 500);
   const destinations = [
     { scope: 'US', address: DEFAULT_TO_ADDRESS_US },
     { scope: 'GB', address: DEFAULT_TO_ADDRESS_GB },

@@ -5,11 +5,12 @@ const { fetchItemDetails } = require("./itemService")
 const { upsertBuyer } = require('./buyerService');
 const { logError } = require('./loggingService');
 const { logSystemError } = require('./systemErrorService');
-const { fetchShipmentDetailsByReference } = require('./shipcoService');
+const { fetchShipmentDetailsByReference, fetchShipmentDetailsByTracking } = require('./shipcoService');
 const { uploadTrackingInfoToEbay } = require('./orderTrackingService');
 
 const DEFAULT_PAYOUT_CURRENCY = 'USD';
 const INCENTIVE_RATE = 0.1;
+const US_DUTY_RATE = 0.15;
 
 const ENV_EXCHANGE_RATES = {
     USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 145,
@@ -26,6 +27,15 @@ const normalizeCurrencyCode = (value) => {
     }
     const trimmed = value.trim();
     return trimmed ? trimmed.toUpperCase() : null;
+};
+
+const getExchangeRateToJPY = (currency, exchangeRates) => {
+    if (!currency) {
+        return null;
+    }
+    const normalized = normalizeCurrencyCode(currency);
+    const rate = exchangeRates[normalized];
+    return typeof rate === 'number' && Number.isFinite(rate) ? rate : null;
 };
 
 const toNumber = (value) => {
@@ -88,12 +98,21 @@ const calculateOrderFinancials = (order, exchangeRates) => {
     const earningsCurrency = normalizeCurrencyCode(order.earnings_after_pl_fee_currency) ||
         normalizeCurrencyCode(order.earnings_currency) ||
         DEFAULT_PAYOUT_CURRENCY;
-    const rate = exchangeRates[earningsCurrency];
-    const earningsAfterFeeJpy = rate ? earningsAfterFee * rate : null;
+    const rate = getExchangeRateToJPY(earningsCurrency, exchangeRates);
+    const earningsAfterFeeJpy = rate !== null ? earningsAfterFee * rate : null;
+    const totalAmount = toNumber(order.total_amount || order.subtotal);
+    const totalAmountCurrency = normalizeCurrencyCode(order.total_amount_currency) ||
+        normalizeCurrencyCode(order.subtotal_currency) ||
+        earningsCurrency;
+    const totalAmountRate = getExchangeRateToJPY(totalAmountCurrency, exchangeRates);
+    const dutyBaseJpy = totalAmountRate !== null ? totalAmount * totalAmountRate : null;
+    const dutyJpy = order.buyer_country_code === 'US' && dutyBaseJpy !== null
+        ? dutyBaseJpy * US_DUTY_RATE
+        : 0;
     const shippingCostJpy = toNumber(order.estimated_shipping_cost);
     const costPriceJpy = sumCostPriceJpy(order.line_items || []);
     const profitJpy = earningsAfterFeeJpy !== null
-        ? earningsAfterFeeJpy - shippingCostJpy - costPriceJpy
+        ? earningsAfterFeeJpy - dutyJpy - shippingCostJpy - costPriceJpy
         : null;
     const profitMargin = earningsAfterFeeJpy && earningsAfterFeeJpy !== 0
         ? (profitJpy / earningsAfterFeeJpy) * 100
@@ -104,6 +123,7 @@ const calculateOrderFinancials = (order, exchangeRates) => {
         earningsAfterFeeJpy,
         shippingCostJpy,
         costPriceJpy,
+        dutyJpy,
         profitJpy,
         profitMargin,
         rateApplied: rate !== undefined && rate !== null,
@@ -121,6 +141,7 @@ const attachFinancialsToOrder = (order, exchangeRates) => {
         calculated_profit_margin: financials.profitMargin,
         calculated_cost_price_jpy: financials.costPriceJpy,
         calculated_shipping_cost_jpy: financials.shippingCostJpy,
+        calculated_duty_jpy: financials.dutyJpy,
         calculated_exchange_rate_applied: financials.rateApplied,
         calculated_exchange_rate_currency: financials.earningsCurrency,
         researcherIncentive: financials.researcherIncentive,
@@ -903,6 +924,15 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         );
         try {
             shipcoDetails = await fetchShipmentDetailsByReference(order.orderId);
+            if (!shipcoDetails) {
+                const trackingCandidate = shippingTrackingNumber || existingData?.shipping_tracking_number || null;
+                if (trackingCandidate) {
+                    console.info(
+                        `[orderService] Ship&Co reference lookup failed for order ${order.orderId}. Retrying with tracking number ${trackingCandidate}.`
+                    );
+                    shipcoDetails = await fetchShipmentDetailsByTracking(trackingCandidate);
+                }
+            }
         } catch (error) {
             logError('orderService.updateOrderInSupabase.fetchShipmentDetailsByReference', error);
             console.error(

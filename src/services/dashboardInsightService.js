@@ -345,6 +345,24 @@ const logAiInsight = async ({
   }
 };
 
+const fetchCachedInsight = async ({ userId, date }) => {
+  const { data, error } = await supabase
+    .from('ai_insights')
+    .select('date, output_insight_json, model, usage, created_at')
+    .eq('user_id', userId)
+    .eq('date', date)
+    .not('output_insight_json', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error('[dashboardInsight] Failed to fetch cached insight:', error.message);
+    return null;
+  }
+  return data || null;
+};
+
 const generateTodayAiInsight = async ({ userId, date }) => {
   const insightDate = date || getCurrentEbayDay();
   const inputMetrics = await buildInsightMetrics({ userId, date: insightDate });
@@ -371,6 +389,16 @@ const generateTodayAiInsight = async ({ userId, date }) => {
       errorMessage = `OpenAI error ${status || ''}: ${JSON.stringify(detail)}`;
     } else {
       errorMessage = error?.message || 'AI insight generation failed';
+    }
+    const cached = await fetchCachedInsight({ userId, date: insightDate });
+    if (cached?.output_insight_json) {
+      return {
+        insight: cached.output_insight_json,
+        input_metrics: inputMetrics,
+        model: cached.model,
+        usage: cached.usage,
+        cached: true,
+      };
     }
     throw error;
   } finally {

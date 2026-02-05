@@ -64,6 +64,28 @@ const shipmentMatchesReference = (shipment = {}, reference) => {
     });
 };
 
+const extractReferenceCandidate = (shipment = {}) => {
+    const candidates = [
+        shipment.reference,
+        shipment.order_reference,
+        shipment.orderReference,
+        shipment.order_number,
+        shipment.orderNumber,
+        shipment.shipment_reference,
+        shipment.shipmentReference,
+        shipment?.setup?.ref_number,
+        shipment?.setup?.refNumber,
+        shipment.id,
+    ];
+    for (const candidate of candidates) {
+        const normalized = normalizeString(candidate);
+        if (normalized) {
+            return normalized;
+        }
+    }
+    return null;
+};
+
 const extractTrackingNumbersFromDelivery = (delivery = {}) => {
     if (!delivery || typeof delivery !== 'object') {
         return [];
@@ -118,6 +140,27 @@ const extractTrackingFromShipment = (shipment = {}) => {
     }
 
     return null;
+};
+
+const shipmentMatchesTracking = (shipment = {}, trackingNumber) => {
+    if (!trackingNumber) {
+        return true;
+    }
+    const targetStrict = normalizeComparable(trackingNumber);
+    const targetLoose = normalizeComparableLoose(trackingNumber);
+    const candidates = [
+        extractTrackingFromShipment(shipment),
+        ...(extractTrackingNumbersFromDelivery(shipment.delivery) || []),
+    ];
+    return candidates.some((candidate) => {
+        if (!candidate) return false;
+        const strict = normalizeComparable(candidate);
+        if (strict && strict === targetStrict) {
+            return true;
+        }
+        const loose = normalizeComparableLoose(candidate);
+        return loose && loose === targetLoose;
+    });
 };
 
 const extractDeliveryRateFromShipment = (shipment = {}) => {
@@ -249,6 +292,73 @@ const fetchShipmentDetailsByReference = async (reference) => {
         return null;
     }
     try {
+        try {
+            const directResponse = await client.get(`/shipments/${encodeURIComponent(reference)}`);
+            const directShipment = directResponse?.data || null;
+            if (directShipment && typeof directShipment === 'object') {
+                console.info(
+                    `[shipcoService] Direct shipment lookup succeeded for reference ${reference}.`
+                );
+                const tracking = extractTrackingFromShipment(directShipment);
+                const deliveryRate = extractDeliveryRateFromShipment(directShipment);
+                const parcel = extractFirstParcelFromShipment(directShipment);
+                const carrier = extractCarrierFromShipment(directShipment);
+
+                if (tracking) {
+                    console.info(
+                        `[shipcoService] Extracted tracking number for reference ${reference}:`,
+                        tracking
+                    );
+                } else {
+                    console.warn(
+                        `[shipcoService] No tracking number found in direct shipment for reference ${reference}`
+                    );
+                }
+                if (deliveryRate.amount !== null) {
+                    console.info(
+                        `[shipcoService] Extracted shipping cost for reference ${reference}:`,
+                        `${deliveryRate.amount}${deliveryRate.currency ? ` ${deliveryRate.currency}` : ''}`
+                    );
+                } else {
+                    console.warn(
+                        `[shipcoService] No shipping cost found in direct shipment for reference ${reference}`
+                    );
+                }
+                if (parcel) {
+                    console.info(
+                        `[shipcoService] Extracted parcel details for reference ${reference}:`,
+                        parcel
+                    );
+                }
+                if (carrier) {
+                    console.info(
+                        `[shipcoService] Extracted carrier for reference ${reference}:`,
+                        carrier
+                    );
+                } else {
+                    const deliveryKeys = directShipment?.delivery
+                        ? Object.keys(directShipment.delivery)
+                        : [];
+                    const shipmentKeys = directShipment ? Object.keys(directShipment) : [];
+                    console.warn(
+                        `[shipcoService] No carrier found for reference ${reference}. delivery keys=${deliveryKeys.join(',') || 'none'} shipment keys=${shipmentKeys.join(',') || 'none'}`
+                    );
+                }
+
+                return {
+                    trackingNumber: tracking || null,
+                    deliveryRate: deliveryRate.amount,
+                    deliveryCurrency: deliveryRate.currency,
+                    parcel,
+                    carrier,
+                };
+            }
+        } catch (directError) {
+            const status = directError?.response?.status || 'unknown';
+            console.info(
+                `[shipcoService] Direct shipment lookup failed for reference ${reference}. status=${status}`
+            );
+        }
         const params = {
             scope: 'all',
             reference,
@@ -270,6 +380,18 @@ const fetchShipmentDetailsByReference = async (reference) => {
 
         const targetShipment = matchingShipments[0];
         if (!targetShipment) {
+            const sampleRefs = shipments
+                .map((shipment) => extractReferenceCandidate(shipment))
+                .filter(Boolean);
+            const uniqueRefs = Array.from(new Set(sampleRefs)).slice(0, 5);
+            const sampleIds = shipments
+                .map((shipment) => shipment?.id)
+                .filter(Boolean)
+                .slice(0, 5);
+            console.info(
+                `[shipcoService] Sample shipment references for troubleshooting ${reference}:`,
+                { sampleRefs: uniqueRefs, sampleIds, total: shipments.length }
+            );
             console.warn(
                 `[shipcoService] No matching shipment found for reference ${reference}.`
             );
@@ -336,6 +458,116 @@ const fetchShipmentDetailsByReference = async (reference) => {
 };
 
 exports.fetchShipmentDetailsByReference = fetchShipmentDetailsByReference;
+
+const fetchShipmentDetailsByTracking = async (trackingNumber) => {
+    if (!trackingNumber) {
+        return null;
+    }
+    const client = buildClient();
+    if (!client) {
+        console.warn('[shipcoService] Ship&Co client is not configured. Missing SHIPANDCO_API_TOKEN?');
+        return null;
+    }
+    try {
+        const params = {
+            scope: 'all',
+            limit: SHIP_AND_CO_DEFAULT_LIMIT,
+        };
+        console.info('[shipcoService] Fetching Ship&Co shipments for tracking lookup:', params);
+        const response = await client.get('/shipments', { params });
+        const data = response.data || {};
+        const shipments = Array.isArray(data.shipments) ? data.shipments : Array.isArray(data) ? data : [];
+        console.info('[shipcoService] Received shipments for tracking lookup:', shipments.length);
+
+        const matchingShipments = shipments.filter((shipment) =>
+            shipmentMatchesTracking(shipment, trackingNumber)
+        );
+        console.info(
+            `[shipcoService] Matching shipments for tracking ${trackingNumber}:`,
+            matchingShipments.length
+        );
+
+        const targetShipment = matchingShipments[0];
+        if (!targetShipment) {
+            const sampleRefs = shipments
+                .map((shipment) => extractReferenceCandidate(shipment))
+                .filter(Boolean);
+            const uniqueRefs = Array.from(new Set(sampleRefs)).slice(0, 5);
+            const sampleIds = shipments
+                .map((shipment) => shipment?.id)
+                .filter(Boolean)
+                .slice(0, 5);
+            console.info(
+                `[shipcoService] Sample shipment references for tracking ${trackingNumber}:`,
+                { sampleRefs: uniqueRefs, sampleIds, total: shipments.length }
+            );
+            console.warn(
+                `[shipcoService] No matching shipment found for tracking ${trackingNumber}.`
+            );
+            return null;
+        }
+
+        const tracking = extractTrackingFromShipment(targetShipment);
+        const deliveryRate = extractDeliveryRateFromShipment(targetShipment);
+        const parcel = extractFirstParcelFromShipment(targetShipment);
+        const carrier = extractCarrierFromShipment(targetShipment);
+
+        if (tracking) {
+            console.info(
+                `[shipcoService] Extracted tracking number for tracking lookup ${trackingNumber}:`,
+                tracking
+            );
+        } else {
+            console.warn(
+                `[shipcoService] No tracking number found in shipment for tracking lookup ${trackingNumber}`
+            );
+        }
+        if (deliveryRate.amount !== null) {
+            console.info(
+                `[shipcoService] Extracted shipping cost for tracking lookup ${trackingNumber}:`,
+                `${deliveryRate.amount}${deliveryRate.currency ? ` ${deliveryRate.currency}` : ''}`
+            );
+        } else {
+            console.warn(
+                `[shipcoService] No shipping cost found in shipment for tracking lookup ${trackingNumber}`
+            );
+        }
+        if (parcel) {
+            console.info(
+                `[shipcoService] Extracted parcel details for tracking lookup ${trackingNumber}:`,
+                parcel
+            );
+        }
+        if (carrier) {
+            console.info(
+                `[shipcoService] Extracted carrier for tracking lookup ${trackingNumber}:`,
+                carrier
+            );
+        } else {
+            const deliveryKeys = targetShipment?.delivery
+                ? Object.keys(targetShipment.delivery)
+                : [];
+            const shipmentKeys = targetShipment ? Object.keys(targetShipment) : [];
+            console.warn(
+                `[shipcoService] No carrier found for tracking lookup ${trackingNumber}. delivery keys=${deliveryKeys.join(',') || 'none'} shipment keys=${shipmentKeys.join(',') || 'none'}`
+            );
+        }
+
+        return {
+            trackingNumber: tracking || null,
+            deliveryRate: deliveryRate.amount,
+            deliveryCurrency: deliveryRate.currency,
+            parcel,
+            carrier,
+        };
+    } catch (error) {
+        logError('shipcoService.fetchShipmentDetailsByTracking', error);
+        console.error('[shipcoService] Failed to fetch shipment by tracking:', trackingNumber, error?.message || error);
+        return null;
+    }
+};
+
+exports.fetchShipmentDetailsByTracking = fetchShipmentDetailsByTracking;
 
 exports.fetchRates = async (payload) => {
     const client = buildClient();

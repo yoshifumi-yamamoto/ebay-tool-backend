@@ -271,7 +271,7 @@ async function searchItems(queryParams) {
 }
 
 async function searchItemsSimple(queryParams) {
-  const { user_id, listing_title, ebay_item_id, limit = 200 } = queryParams;
+  const { user_id, listing_title, ebay_item_id, sku, limit = 200 } = queryParams;
 
   if (!user_id) {
     throw new Error('user_id is required');
@@ -280,7 +280,7 @@ async function searchItemsSimple(queryParams) {
   const numericLimit = Number.isFinite(Number(limit)) ? Number(limit) : 200;
   let query = supabase
     .from('items')
-    .select('ebay_item_id, title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency, primary_image_url')
+    .select('ebay_item_id, sku, item_title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency, primary_image_url')
     .eq('user_id', user_id)
     .order('updated_at', { ascending: false })
     .limit(numericLimit);
@@ -288,11 +288,15 @@ async function searchItemsSimple(queryParams) {
   if (listing_title) {
     const normalizedTitle = listing_title.trim();
     const tokenizedPattern = normalizedTitle.replace(/\s+/g, '%');
-    query = query.ilike('title', `%${tokenizedPattern}%`);
+    query = query.ilike('item_title', `%${tokenizedPattern}%`);
   }
 
   if (ebay_item_id) {
     query = query.eq('ebay_item_id', ebay_item_id);
+  }
+
+  if (sku) {
+    query = query.ilike('sku', `%${sku.trim()}%`);
   }
 
   const { data, error } = await query;

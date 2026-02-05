@@ -11,71 +11,51 @@ exports.fetchListingsSummary = async (filters) => {
     throw new Error('start_date and end_date are required');
   }
 
-  const itemFields = 'exhibit_date, research_date, researcher, exhibitor, ebay_user_id';
+  const { data: summaryRows, error: summaryError } = await supabase.rpc(
+    'listings_summary_counts',
+    {
+      p_user_id: user_id,
+      p_start_date: start_date,
+      p_end_date: end_date,
+    }
+  );
 
-  const exhibitQuery = supabase
-    .from('items')
-    .select(itemFields)
-    .eq('user_id', user_id)
-    .gte('exhibit_date', start_date)
-    .lte('exhibit_date', end_date);
-
-  const researchQuery = supabase
-    .from('items')
-    .select(itemFields)
-    .eq('user_id', user_id)
-    .gte('research_date', start_date)
-    .lte('research_date', end_date);
-
-  const [{ data: exhibitItems, error: exhibitError }, { data: researchItems, error: researchError }] =
-    await Promise.all([exhibitQuery, researchQuery]);
-
-  if (exhibitError || researchError) {
-    const message = exhibitError?.message || researchError?.message || 'unknown error';
-    console.error('Error fetching items data:', message);
-    throw exhibitError || researchError;
+  if (summaryError) {
+    console.error('Error fetching listing summary:', summaryError.message);
+    throw summaryError;
   }
 
-  // ordersテーブルからデータを取得
-  let ordersQuery = supabase
-    .from('orders')
-    .select('order_date, researcher')
-    .eq('user_id', user_id)
-    .gte('order_date', start_date)
-    .lte('order_date', end_date);
-
-  const { data: ordersData, error: ordersError } = await ordersQuery;
-  if (ordersError) {
-    console.error('Error fetching orders data:', ordersError.message);
-    throw ordersError;
-  }
-
-  // 出品件数とリサーチ件数を集計
   const listingsSummary = {};
   let totalExhibitCount = 0;
-  const accountSummary = {};
+  (summaryRows || []).forEach((row) => {
+    const name = row.researcher || 'unknown';
+    listingsSummary[name] = {
+      exhibitCount: Number(row.exhibit_count) || 0,
+      researchCount: Number(row.research_count) || 0,
+      salesCount: Number(row.sales_count) || 0,
+    };
+    totalExhibitCount += Number(row.exhibit_count) || 0;
+  });
 
-  for (const item of exhibitItems || []) {
-    const { exhibitor, ebay_user_id } = item;
-    if (!listingsSummary[exhibitor]) {
-      listingsSummary[exhibitor] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
+  const { data: accountRows, error: accountError } = await supabase.rpc(
+    'listings_summary_account_counts',
+    {
+      p_user_id: user_id,
+      p_start_date: start_date,
+      p_end_date: end_date,
     }
-    listingsSummary[exhibitor].exhibitCount++;
-    totalExhibitCount++;
+  );
 
-    if (ebay_user_id) {
-      if (!accountSummary[ebay_user_id]) accountSummary[ebay_user_id] = 0;
-      accountSummary[ebay_user_id]++;
-    }
+  if (accountError) {
+    console.error('Error fetching account summary:', accountError.message);
+    throw accountError;
   }
 
-  for (const item of researchItems || []) {
-    const { researcher } = item;
-    if (!listingsSummary[researcher]) {
-      listingsSummary[researcher] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
-    }
-    listingsSummary[researcher].researchCount++;
-  }
+  const accountSummary = (accountRows || []).reduce((acc, row) => {
+    if (!row?.ebay_user_id) return acc;
+    acc[row.ebay_user_id] = Number(row.exhibit_count) || 0;
+    return acc;
+  }, {});
 
   const accounts = await getAccountsByUserId(user_id);
   accounts.forEach((account) => {
@@ -87,15 +67,6 @@ exports.fetchListingsSummary = async (filters) => {
       accountSummary[ebayUserId] = 0;
     }
   });
-
-  ordersData.forEach(order => {
-    const { researcher } = order;
-    if (!listingsSummary[researcher]) {
-      listingsSummary[researcher] = { exhibitCount: 0, researchCount: 0, salesCount: 0 };
-    }
-    listingsSummary[researcher].salesCount++;
-  });
-
 
   return { listingsSummary, totalExhibitCount, accountSummary };
 };
