@@ -1,4 +1,4 @@
-const { getSendOfferEligibleItems } = require('../services/marketingService');
+const { getSendOfferEligibleItems, bulkApplyPromotedListings } = require('../services/marketingService');
 
 exports.getSendOfferEligible = async (req, res) => {
     const { accountId, limit, offset } = req.query;
@@ -26,5 +26,15 @@ exports.getSendOfferEligible = async (req, res) => {
             error: error.message || 'Failed to fetch eligible items',
             details: responseErrors || error.responseData || null
         });
+    }
+};
+
+exports.bulkApplyPromotedListings = async (req, res) => {
+    const { accountIds, bidPercentage } = req.body || {};
+    try {
+        const data = await bulkApplyPromotedListings({ accountIds, bidPercentage });
+        res.json(data);
+    } catch (error) {
+        res.status(400).json({ error: error.message || 'Failed to apply promoted listings' });
     }
 };
