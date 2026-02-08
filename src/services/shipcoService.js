@@ -4,6 +4,7 @@ const { logError } = require('./loggingService');
 const SHIP_AND_CO_API_URL = process.env.SHIPANDCO_API_URL || 'https://api.shipandco.com/v1';
 const SHIP_AND_CO_API_TOKEN = process.env.SHIPANDCO_API_TOKEN || process.env.SHIPANDCO_API_KEY || null;
 const SHIP_AND_CO_DEFAULT_LIMIT = Number(process.env.SHIPANDCO_FETCH_LIMIT) || 100;
+const SHIP_AND_CO_MAX_PAGES = Number(process.env.SHIPANDCO_FETCH_MAX_PAGES) || 50;
 
 const buildClient = () => {
     if (!SHIP_AND_CO_API_TOKEN) {
@@ -232,6 +233,44 @@ const toNumberOrNull = (value) => {
     return Number.isFinite(parsed) ? parsed : null;
 };
 
+const fetchShipmentsPaginated = async (client, params, matchFn, label) => {
+    const allShipments = [];
+    const seenIds = new Set();
+    let offset = 0;
+    for (let page = 0; page < SHIP_AND_CO_MAX_PAGES; page += 1) {
+        const pageParams = { ...params, offset };
+        const response = await client.get('/shipments', { params: pageParams });
+        const data = response.data || {};
+        const shipments = Array.isArray(data.shipments) ? data.shipments : Array.isArray(data) ? data : [];
+        
+
+        let added = 0;
+        for (const shipment of shipments) {
+            const id = shipment?.id || null;
+            if (id && seenIds.has(id)) {
+                continue;
+            }
+            if (id) {
+                seenIds.add(id);
+            }
+            allShipments.push(shipment);
+            added += 1;
+            if (matchFn && matchFn(shipment)) {
+                return { shipment, shipments: allShipments };
+            }
+        }
+
+        if (shipments.length < (params.limit || SHIP_AND_CO_DEFAULT_LIMIT)) {
+            break;
+        }
+        if (added === 0) {
+            break;
+        }
+        offset += params.limit || SHIP_AND_CO_DEFAULT_LIMIT;
+    }
+    return { shipment: null, shipments: allShipments };
+};
+
 const extractFirstParcelFromShipment = (shipment = {}) => {
     const parcels = Array.isArray(shipment?.parcels) ? shipment.parcels : [];
     if (parcels.length === 0) {
@@ -365,33 +404,17 @@ const fetchShipmentDetailsByReference = async (reference) => {
             limit: SHIP_AND_CO_DEFAULT_LIMIT,
         };
         console.info('[shipcoService] Fetching Ship&Co shipments with params:', params);
-        const response = await client.get('/shipments', { params });
-        const data = response.data || {};
-        const shipments = Array.isArray(data.shipments) ? data.shipments : Array.isArray(data) ? data : [];
-        console.info('[shipcoService] Received shipments:', shipments.length);
-
-        const matchingShipments = shipments.filter((shipment) =>
-            shipmentMatchesReference(shipment, reference)
+        const { shipment: targetShipment, shipments } = await fetchShipmentsPaginated(
+            client,
+            params,
+            (shipment) => shipmentMatchesReference(shipment, reference),
+            `reference ${reference}`
         );
         console.info(
             `[shipcoService] Matching shipments for reference ${reference}:`,
-            matchingShipments.length
+            targetShipment ? 1 : 0
         );
-
-        const targetShipment = matchingShipments[0];
         if (!targetShipment) {
-            const sampleRefs = shipments
-                .map((shipment) => extractReferenceCandidate(shipment))
-                .filter(Boolean);
-            const uniqueRefs = Array.from(new Set(sampleRefs)).slice(0, 5);
-            const sampleIds = shipments
-                .map((shipment) => shipment?.id)
-                .filter(Boolean)
-                .slice(0, 5);
-            console.info(
-                `[shipcoService] Sample shipment references for troubleshooting ${reference}:`,
-                { sampleRefs: uniqueRefs, sampleIds, total: shipments.length }
-            );
             console.warn(
                 `[shipcoService] No matching shipment found for reference ${reference}.`
             );
@@ -474,33 +497,17 @@ const fetchShipmentDetailsByTracking = async (trackingNumber) => {
             limit: SHIP_AND_CO_DEFAULT_LIMIT,
         };
         console.info('[shipcoService] Fetching Ship&Co shipments for tracking lookup:', params);
-        const response = await client.get('/shipments', { params });
-        const data = response.data || {};
-        const shipments = Array.isArray(data.shipments) ? data.shipments : Array.isArray(data) ? data : [];
-        console.info('[shipcoService] Received shipments for tracking lookup:', shipments.length);
-
-        const matchingShipments = shipments.filter((shipment) =>
-            shipmentMatchesTracking(shipment, trackingNumber)
+        const { shipment: targetShipment, shipments } = await fetchShipmentsPaginated(
+            client,
+            params,
+            (shipment) => shipmentMatchesTracking(shipment, trackingNumber),
+            `tracking ${trackingNumber}`
         );
         console.info(
             `[shipcoService] Matching shipments for tracking ${trackingNumber}:`,
-            matchingShipments.length
+            targetShipment ? 1 : 0
         );
-
-        const targetShipment = matchingShipments[0];
         if (!targetShipment) {
-            const sampleRefs = shipments
-                .map((shipment) => extractReferenceCandidate(shipment))
-                .filter(Boolean);
-            const uniqueRefs = Array.from(new Set(sampleRefs)).slice(0, 5);
-            const sampleIds = shipments
-                .map((shipment) => shipment?.id)
-                .filter(Boolean)
-                .slice(0, 5);
-            console.info(
-                `[shipcoService] Sample shipment references for tracking ${trackingNumber}:`,
-                { sampleRefs: uniqueRefs, sampleIds, total: shipments.length }
-            );
             console.warn(
                 `[shipcoService] No matching shipment found for tracking ${trackingNumber}.`
             );

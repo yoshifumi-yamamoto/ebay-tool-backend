@@ -155,23 +155,91 @@ async function fetchOrdersFromEbay(refreshToken) {
             Authorization: `Bearer ${refreshToken}`,
             'Content-Type': 'application/json',
         };
+        const now = new Date();
+        const lookbackDays = Number.parseInt(process.env.EBAY_ORDER_LOOKBACK_DAYS || '120', 10);
+        const fromDate = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+        const creationDateFilter = `creationdate:[${fromDate.toISOString()}..${now.toISOString()}]`;
 
         const fetchWithFilter = async (filter) => {
             const response = await axios({
                 method: 'get',
                 url: baseUrl,
                 headers,
-                params: filter ? { filter } : undefined,
+                params: {
+                    ...(filter ? { filter } : {}),
+                },
             });
-            return response.data.orders || [];
+            return response.data || {};
         };
 
-        return await fetchWithFilter(null);
+        const payload = await fetchWithFilter(creationDateFilter);
+        return payload.orders || [];
     } catch (error) {
         console.error('Error fetching orders from eBay:', error);
         throw error;
     }
 }
+
+async function fetchEbayOrderById(orderId, refreshToken) {
+    if (!orderId) return null;
+    const baseUrl = 'https://api.ebay.com/sell/fulfillment/v1/order';
+    const headers = {
+        Authorization: `Bearer ${refreshToken}`,
+        'Content-Type': 'application/json',
+    };
+    try {
+        const response = await axios({
+            method: 'get',
+            url: `${baseUrl}/${encodeURIComponent(orderId)}`,
+            headers,
+        });
+        return response.data || null;
+    } catch (_error) {
+        return null;
+    }
+}
+
+async function fetchPostOrderByLegacyId(legacyOrderId, accessToken, marketplaceId = 'EBAY_US') {
+    if (!legacyOrderId) return null;
+    const baseUrl = 'https://api.ebay.com/post-order/v2/order';
+    const headers = {
+        Authorization: `IAF ${accessToken}`,
+        'Content-Type': 'application/json',
+        'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+    };
+    try {
+        const response = await axios({
+            method: 'get',
+            url: `${baseUrl}/${encodeURIComponent(legacyOrderId)}`,
+            headers,
+        });
+        return response.data || null;
+    } catch (_error) {
+        return null;
+    }
+}
+
+const findFulfillmentOrderIdInPostOrder = (postOrder) => {
+    if (!postOrder) return null;
+    const stack = [postOrder];
+    while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current) continue;
+        if (typeof current === 'string' && current.includes('v1|')) {
+            return current;
+        }
+        if (Array.isArray(current)) {
+            for (const item of current) {
+                stack.push(item);
+            }
+        } else if (typeof current === 'object') {
+            for (const value of Object.values(current)) {
+                stack.push(value);
+            }
+        }
+    }
+    return null;
+};
 
 const normalizeCancelStatus = (value) => {
     if (!value) return null;
@@ -1154,7 +1222,7 @@ async function saveOrdersAndBuyers(userId) {
         }
 
         try {
-            const orders = await fetchOrdersFromEbay(accessToken);
+            let orders = await fetchOrdersFromEbay(accessToken);
 
             const legacyItemIds = orders.flatMap(order => order.lineItems.map(item => item.legacyItemId));
 
@@ -1209,13 +1277,19 @@ async function saveOrdersAndBuyers(userId) {
 
 
             const debugOrderNo = process.env.DEBUG_ORDER_NO || '24-14010-37569';
+            const targetDebugOrderNo = '05-14142-80431';
+            let debugOrderFound = false;
             for (let order of orders) {
                 try {
                     if (order?.orderId === debugOrderNo) {
+                        debugOrderFound = true;
                         console.info(
                             '[orderService] Debug eBay order payload:',
                             JSON.stringify(order, null, 2)
                         );
+                    }
+                    if (order?.orderId === targetDebugOrderNo) {
+                        debugOrderFound = true;
                     }
                     const buyer = await fetchAndUpsertBuyer(order, userId);
                     if (!buyer) {
@@ -1266,9 +1340,26 @@ async function saveOrdersAndBuyers(userId) {
 
                 }
             }
+            const marketplaceId = account?.marketplace_id || process.env.EBAY_MARKETPLACE_ID || 'EBAY_US';
+            if (!debugOrderFound) {
+                const directOrder = await fetchEbayOrderById(targetDebugOrderNo, accessToken);
+                if (directOrder) {
+                    orders.push(directOrder);
+                } else {
+                    const postOrder = await fetchPostOrderByLegacyId(targetDebugOrderNo, accessToken, marketplaceId);
+                    if (postOrder) {
+                        const fulfillmentOrderId = findFulfillmentOrderIdInPostOrder(postOrder);
+                        if (fulfillmentOrderId) {
+                            const fallbackOrder = await fetchEbayOrderById(fulfillmentOrderId, accessToken);
+                            if (fallbackOrder) {
+                                orders.push(fallbackOrder);
+                            }
+                        }
+                    }
+                }
+            }
 
             try {
-                const marketplaceId = account?.marketplace_id || process.env.EBAY_MARKETPLACE_ID || 'EBAY_US';
                 const cancellations = await fetchCancellationSummariesFromEbay(accessToken, marketplaceId);
                 if (cancellations.length > 0) {
                     const cancelledOrderNos = cancellations

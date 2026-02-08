@@ -171,6 +171,7 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       'estimated_shipping_cost',
       'shipco_shipping_cost',
       'final_shipping_cost',
+      'shipping_tracking_number',
       'status',
       'shipping_status',
       'shipco_synced_at',
@@ -380,11 +381,99 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
     const ts = new Date(value);
     return ts >= fromTs && ts < toTs;
   });
+  const shippingTrackingNumbers = Array.from(
+    new Set(shippingConfirmedOrders.map((order) => order.shipping_tracking_number).filter(Boolean))
+  );
+  let customsTotalByAwb = {};
+  if (shippingTrackingNumbers.length > 0) {
+    const { data: shipments, error: shipmentsError } = await supabase
+      .from('carrier_shipments')
+      .select('id, awb_number')
+      .in('awb_number', shippingTrackingNumbers);
+    if (!shipmentsError && Array.isArray(shipments)) {
+      const shipmentIds = shipments.map((row) => row.id).filter(Boolean);
+      if (shipmentIds.length > 0) {
+        const { data: charges, error: chargesError } = await supabase
+          .from('carrier_charges')
+          .select('shipment_id, amount, charge_group')
+          .in('shipment_id', shipmentIds)
+          .eq('charge_group', 'customs');
+        if (!chargesError && Array.isArray(charges)) {
+          const awbByShipmentId = shipments.reduce((acc, row) => {
+            if (row.id && row.awb_number) {
+              acc[row.id] = row.awb_number;
+            }
+            return acc;
+          }, {});
+          customsTotalByAwb = charges.reduce((acc, charge) => {
+            const awb = awbByShipmentId[charge.shipment_id];
+            if (!awb) return acc;
+            acc[awb] = (acc[awb] || 0) + toNumber(charge.amount);
+            return acc;
+          }, {});
+        }
+      }
+    }
+  }
   const shippingConfirmedAmount = shippingConfirmedOrders.reduce((acc, order) => {
     const actual = toNumber(order.final_shipping_cost) || toNumber(order.shipco_shipping_cost);
     if (actual > 0) return acc + actual;
     return acc + toNumber(order.estimated_shipping_cost);
   }, 0);
+  const shippingConfirmedDetails = shippingConfirmedOrders.map((order) => {
+    const totalAmount = toNumber(order.total_amount) || toNumber(order.subtotal);
+    const totalCurrency =
+      normalizeCurrencyCode(order.total_amount_currency) ||
+      normalizeCurrencyCode(order.subtotal_currency) ||
+      DEFAULT_DASHBOARD_CURRENCY;
+    const dutyBaseJpy = convertAmountToJpy(totalAmount, totalCurrency, exchangeRates);
+    const dutyEstimatedJpy =
+      order.buyer_country_code === 'US' && dutyBaseJpy !== null ? dutyBaseJpy * US_DUTY_RATE : 0;
+    const trackingNumber = order.shipping_tracking_number || null;
+    const confirmedDutyJpy = trackingNumber ? customsTotalByAwb[trackingNumber] ?? null : null;
+    const shippingActual = toNumber(order.final_shipping_cost) || toNumber(order.shipco_shipping_cost) || 0;
+    const shippingEstimated = toNumber(order.estimated_shipping_cost) || 0;
+    const shippingDelta = shippingActual && shippingEstimated ? shippingActual - shippingEstimated : null;
+    const dutyDelta =
+      confirmedDutyJpy !== null && confirmedDutyJpy !== undefined
+        ? confirmedDutyJpy - dutyEstimatedJpy
+        : null;
+    return {
+      order_no: order.order_no || null,
+      shipping_tracking_number: trackingNumber,
+      shipping_actual_cost: shippingActual || null,
+      shipping_estimated_cost: shippingEstimated || null,
+      shipping_delta: shippingDelta,
+      duty_estimated_jpy: dutyEstimatedJpy,
+      duty_confirmed_jpy: confirmedDutyJpy,
+      duty_delta_jpy: dutyDelta,
+    };
+  });
+  const shippingConfirmedSummary = shippingConfirmedDetails.reduce(
+    (acc, row) => {
+      acc.shipping_actual_total += toNumber(row.shipping_actual_cost);
+      acc.shipping_estimated_total += toNumber(row.shipping_estimated_cost);
+      if (row.shipping_delta !== null && row.shipping_delta !== undefined) {
+        acc.shipping_delta_total += toNumber(row.shipping_delta);
+      }
+      acc.duty_estimated_total += toNumber(row.duty_estimated_jpy);
+      if (row.duty_confirmed_jpy !== null && row.duty_confirmed_jpy !== undefined) {
+        acc.duty_confirmed_total += toNumber(row.duty_confirmed_jpy);
+      }
+      if (row.duty_delta_jpy !== null && row.duty_delta_jpy !== undefined) {
+        acc.duty_delta_total += toNumber(row.duty_delta_jpy);
+      }
+      return acc;
+    },
+    {
+      shipping_actual_total: 0,
+      shipping_estimated_total: 0,
+      shipping_delta_total: 0,
+      duty_estimated_total: 0,
+      duty_confirmed_total: 0,
+      duty_delta_total: 0,
+    }
+  );
 
   const ddpConfirmedOrders = [];
   const ddpConfirmedAmount = 0;
@@ -487,6 +576,8 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
         count: shippingConfirmedOrders.length,
         amount: shippingConfirmedAmount,
       },
+      shipping_confirmed_details: shippingConfirmedDetails,
+      shipping_confirmed_summary: shippingConfirmedSummary,
       ddp_confirmed: {
         count: ddpConfirmedOrders.length,
         amount: ddpConfirmedAmount,
