@@ -39,6 +39,8 @@ const htsCodeRoutes = require('./routes/htsCodeRoutes');
 const usDutyRoutes = require('./routes/usDutyRoutes');
 const employeeRoutes = require('./routes/employeeRoutes');
 const nameMapRoutes = require('./routes/nameMapRoutes');
+const fixedCostRoutes = require('./routes/fixedCostRoutes');
+const priorityQuadrantRoutes = require('./routes/priorityQuadrantRoutes');
 
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
@@ -139,6 +141,8 @@ app.use('/api/hts-codes', htsCodeRoutes);
 app.use('/api/duty', usDutyRoutes);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/name-maps', nameMapRoutes);
+app.use('/api/fixed-costs', fixedCostRoutes);
+app.use('/api/priority', priorityQuadrantRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {

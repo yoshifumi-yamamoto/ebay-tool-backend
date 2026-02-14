@@ -196,6 +196,7 @@ exports.fetchCarrierRates = async (filters = {}) => {
     zone,
     is_active,
     include_meta = false,
+    include_all = false,
   } = filters;
 
   const safeLimit = Number.isFinite(Number(limit)) ? Math.min(Number(limit), 500) : 200;
@@ -205,8 +206,11 @@ exports.fetchCarrierRates = async (filters = {}) => {
     .from('shipping_rates')
     .select('*', { count: 'exact' })
     .order('last_synced_at', { ascending: false })
-    .order('created_at', { ascending: false })
-    .range(safeOffset, safeOffset + safeLimit - 1);
+    .order('created_at', { ascending: false });
+
+  if (!include_all) {
+    query = query.range(safeOffset, safeOffset + safeLimit - 1);
+  }
 
   if (carrier) query = query.eq('carrier', carrier);
   if (service) query = query.ilike('service_code', `%${service}%`);

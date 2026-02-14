@@ -1542,17 +1542,22 @@ async function fetchOrderByOrderNo(userId, orderNo) {
     );
 }
 
-async function fetchArchivedOrders(userId, statusFilter = null) {
+async function fetchArchivedOrders(userId, statusFilter = null, filters = {}) {
+    const { start_date, end_date, ebay_user_id } = filters;
     let query = supabase
         .from('orders')
         .select('*, order_line_items(*)')
         .eq('user_id', userId)
         .order('order_date', { ascending: false });
 
+    if (start_date) query = query.gte('order_date', start_date);
+    if (end_date) query = query.lte('order_date', end_date);
+    if (ebay_user_id) query = query.eq('ebay_user_id', ebay_user_id);
+
     if (statusFilter) {
         query = query.eq('status', statusFilter);
     } else {
-        query = query.in('status', ['CANCELED', 'FULLY_REFUNDED']);
+        query = query.in('status', ['CANCELED', 'FULLY_REFUNDED', 'PARTIALLY_REFUNDED']);
     }
 
     const { data, error } = await query;
@@ -1565,6 +1570,98 @@ async function fetchArchivedOrders(userId, statusFilter = null) {
     return (data || [])
         .map(attachNormalizedLineItemsToOrder)
         .map((order) => attachFinancialsToOrder(order, exchangeRates));
+}
+
+async function fetchArchivedSummary(userId, filters = {}) {
+    const { start_date, end_date, ebay_user_id } = filters;
+    const baseOrdersQuery = supabase
+        .from('orders')
+        .select('id, status', { count: 'exact' })
+        .eq('user_id', userId);
+
+    if (start_date) baseOrdersQuery.gte('order_date', start_date);
+    if (end_date) baseOrdersQuery.lte('order_date', end_date);
+    if (ebay_user_id) baseOrdersQuery.eq('ebay_user_id', ebay_user_id);
+
+    const { count: totalOrders, error: totalError } = await baseOrdersQuery;
+    if (totalError) {
+        throw totalError;
+    }
+
+    const canceledQuery = supabase
+        .from('orders')
+        .select('id', { count: 'exact' })
+        .eq('user_id', userId)
+        .eq('status', 'CANCELED');
+    if (start_date) canceledQuery.gte('order_date', start_date);
+    if (end_date) canceledQuery.lte('order_date', end_date);
+    if (ebay_user_id) canceledQuery.eq('ebay_user_id', ebay_user_id);
+    const { count: canceledCount } = await canceledQuery;
+
+    const fullRefundQuery = supabase
+        .from('orders')
+        .select('id', { count: 'exact' })
+        .eq('user_id', userId)
+        .eq('status', 'FULLY_REFUNDED');
+    if (start_date) fullRefundQuery.gte('order_date', start_date);
+    if (end_date) fullRefundQuery.lte('order_date', end_date);
+    if (ebay_user_id) fullRefundQuery.eq('ebay_user_id', ebay_user_id);
+    const { count: fullRefundCount } = await fullRefundQuery;
+
+    let refundOrders = [];
+    const refundQuery = supabase
+        .from('refunds')
+        .select('order_id, refund_at, orders!inner(id,status,ebay_user_id,user_id,order_date)')
+        .eq('orders.user_id', userId);
+    if (start_date) refundQuery.gte('refund_at', start_date);
+    if (end_date) refundQuery.lte('refund_at', end_date);
+    if (ebay_user_id) refundQuery.eq('orders.ebay_user_id', ebay_user_id);
+    const { data: refundData, error: refundError } = await refundQuery;
+    if (!refundError) refundOrders = refundData || [];
+
+    const partialRefundOrderIds = new Set(
+        refundOrders
+            .filter((row) => row?.orders?.status && row.orders.status !== 'FULLY_REFUNDED')
+            .map((row) => row.order_id)
+            .filter(Boolean)
+    );
+
+    const partialRefundStatusQuery = supabase
+        .from('orders')
+        .select('id', { count: 'exact' })
+        .eq('user_id', userId)
+        .eq('status', 'PARTIALLY_REFUNDED');
+    if (start_date) partialRefundStatusQuery.gte('order_date', start_date);
+    if (end_date) partialRefundStatusQuery.lte('order_date', end_date);
+    if (ebay_user_id) partialRefundStatusQuery.eq('ebay_user_id', ebay_user_id);
+    const { count: partialRefundStatusCount } = await partialRefundStatusQuery;
+
+    let returns = [];
+    const returnsQuery = supabase
+        .from('returns')
+        .select('order_id, requested_at, orders!inner(id,ebay_user_id,user_id,order_date)')
+        .eq('orders.user_id', userId);
+    if (start_date) returnsQuery.gte('requested_at', start_date);
+    if (end_date) returnsQuery.lte('requested_at', end_date);
+    if (ebay_user_id) returnsQuery.eq('orders.ebay_user_id', ebay_user_id);
+    const { data: returnsData, error: returnsError } = await returnsQuery;
+    if (!returnsError) returns = returnsData || [];
+
+    const total = totalOrders || 0;
+    const safeRate = (num) => (total > 0 ? (num / total) * 100 : 0);
+
+    return {
+        total_orders: total,
+        canceled_count: canceledCount || 0,
+        full_refund_count: fullRefundCount || 0,
+        partial_refund_count: Math.max(partialRefundOrderIds.size, partialRefundStatusCount || 0),
+        return_count: returns.length,
+        damage_count: null,
+        cancel_rate: safeRate(canceledCount || 0),
+        refund_rate: safeRate((fullRefundCount || 0) + partialRefundOrderIds.size),
+        return_rate: safeRate(returns.length),
+        damage_rate: null,
+    };
 }
 
 
@@ -1806,6 +1903,7 @@ module.exports = {
     fetchRelevantOrders,
     fetchOrderByOrderNo,
     fetchArchivedOrders,
+    fetchArchivedSummary,
     updateOrder,
     fetchLastWeekOrders,
     updateProcurementStatus,

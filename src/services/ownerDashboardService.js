@@ -177,6 +177,7 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
       'shipco_synced_at',
       'order_date',
       'order_no',
+      'ebay_user_id',
       'buyer_country_code',
       'image_url',
       'line_items',
@@ -341,6 +342,7 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
     }
     return {
       order_no: order.order_no || null,
+      ebay_user_id: order.ebay_user_id || null,
       title: extractTitleFromLineItems(lineItems),
       image_url: order.image_url || extractImageFromLineItems(lineItems) || null,
       price,

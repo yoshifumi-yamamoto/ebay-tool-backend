@@ -239,15 +239,44 @@ exports.getOrderByOrderNo = async (req, res) => {
 exports.getArchivedOrdersByUserId = async (req, res) => {
     const userId = req.query.userId;
     const status = req.query.status || null;
+    const start_date = req.query.start_date || null;
+    const end_date = req.query.end_date || null;
+    const ebay_user_id = req.query.ebay_user_id || null;
     if (!userId) {
         return res.status(400).json({ error: 'User ID is required' });
     }
     try {
-        const orders = await orderService.fetchArchivedOrders(userId, status);
+        const orders = await orderService.fetchArchivedOrders(userId, status, { start_date, end_date, ebay_user_id });
         res.json(orders);
     } catch (error) {
         await logSystemError({
             error_code: 'ORDER_ARCHIVED_FETCH_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: true,
+            user_id: userId,
+        });
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// キャンセル/返金サマリー
+exports.getArchivedSummary = async (req, res) => {
+    const userId = req.query.userId;
+    const start_date = req.query.start_date || null;
+    const end_date = req.query.end_date || null;
+    const ebay_user_id = req.query.ebay_user_id || null;
+    if (!userId) {
+        return res.status(400).json({ error: 'User ID is required' });
+    }
+    try {
+        const summary = await orderService.fetchArchivedSummary(userId, { start_date, end_date, ebay_user_id });
+        res.json(summary);
+    } catch (error) {
+        await logSystemError({
+            error_code: 'ORDER_ARCHIVED_SUMMARY_FAILED',
             category: 'DB',
             severity: 'ERROR',
             provider: 'supabase',

@@ -6,6 +6,7 @@ const orderController = require('../controllers/orderController');
 router.get('/user', orderController.getOrdersByUserId);
 router.get('/by-order-no', orderController.getOrderByOrderNo);
 router.get('/archived', orderController.getArchivedOrdersByUserId);
+router.get('/archived-summary', orderController.getArchivedSummary);
 
 // 注文明細の仕入ステータス更新
 router.put('/line-items/:lineItemId/procurement-status', orderController.updateProcurementStatus);
