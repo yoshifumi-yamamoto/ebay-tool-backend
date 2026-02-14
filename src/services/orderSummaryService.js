@@ -7,12 +7,18 @@ const DEFAULT_PAYOUT_CURRENCY = 'USD';
 const INCENTIVE_RATE = 0.1;
 const US_DUTY_RATE = 0.15;
 
+const DEFAULT_USD_JPY = Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150;
+const DEFAULT_EUR_JPY = Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null;
+const DEFAULT_CAD_JPY = Number(process.env.EXCHANGE_RATE_CAD_TO_JPY) || null;
+const DEFAULT_GBP_JPY = Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null;
+const DEFAULT_AUD_JPY = Number(process.env.EXCHANGE_RATE_AUD_TO_JPY) || null;
+
 const ENV_EXCHANGE_RATES = {
-  USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
-  EUR: Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null,
-  CAD: Number(process.env.EXCHANGE_RATE_CAD_TO_JPY) || null,
-  GBP: Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null,
-  AUD: Number(process.env.EXCHANGE_RATE_AUD_TO_JPY) || null,
+  USD: DEFAULT_USD_JPY,
+  EUR: DEFAULT_EUR_JPY,
+  CAD: DEFAULT_CAD_JPY,
+  GBP: DEFAULT_GBP_JPY,
+  AUD: DEFAULT_AUD_JPY,
   JPY: 1,
 };
 
@@ -84,6 +90,24 @@ const addAmountByCurrency = (bucket, currency, amount) => {
   bucket[key] = (bucket[key] || 0) + numericAmount;
 };
 
+const convertAmountToUsd = (amount, currency, exchangeRates) => {
+  const numericAmount = toNumber(amount);
+  if (!Number.isFinite(numericAmount) || numericAmount === 0) {
+    return 0;
+  }
+  const normalizedCurrency = normalizeCurrencyCode(currency) || DEFAULT_ORDER_CURRENCY;
+  if (normalizedCurrency === 'USD') {
+    return numericAmount;
+  }
+  const rateToJpy = getExchangeRateToJPY(normalizedCurrency, exchangeRates);
+  const usdRateToJpy = getExchangeRateToJPY('USD', exchangeRates);
+  if (rateToJpy === null || usdRateToJpy === null || usdRateToJpy === 0) {
+    return null;
+  }
+  const amountJpy = numericAmount * rateToJpy;
+  return amountJpy / usdRateToJpy;
+};
+
 const calculateOrderFinancials = (order, exchangeRates) => {
   const lineItems = order.line_items || [];
   const fallbackCurrency = getOrderCurrency(order);
@@ -106,7 +130,10 @@ const calculateOrderFinancials = (order, exchangeRates) => {
   const earningsAfterFeeCurrency =
     normalizeCurrencyCode(order.earnings_after_pl_fee_currency) || earningsCurrency;
 
-  const shippingCostJpy = toNumber(order.estimated_shipping_cost);
+  const shippingCostJpy =
+    toNumber(order.final_shipping_cost) ||
+    toNumber(order.shipco_shipping_cost) ||
+    toNumber(order.estimated_shipping_cost);
   const costPriceJpy = sumCostPrice(lineItems);
   const exchangeRate = getExchangeRateToJPY(earningsAfterFeeCurrency, exchangeRates);
   const earningsAfterFeeJpy =
@@ -153,9 +180,16 @@ const calculateOrderFinancials = (order, exchangeRates) => {
 const loadExchangeRatesForUser = async (userId) => {
   const normalizedRates = { ...ENV_EXCHANGE_RATES };
   normalizedRates.JPY = 1;
+  const meta = {
+    USD: {
+      value: normalizedRates.USD,
+      configured: false,
+      source: 'default',
+    },
+  };
 
   if (!userId) {
-    return normalizedRates;
+    return { rates: normalizedRates, meta };
   }
 
   try {
@@ -167,11 +201,11 @@ const loadExchangeRatesForUser = async (userId) => {
 
     if (error) {
       console.error('Failed to load user exchange rates:', error.message);
-      return normalizedRates;
+      return { rates: normalizedRates, meta };
     }
 
     if (!data) {
-      return normalizedRates;
+      return { rates: normalizedRates, meta };
     }
 
     const mapping = {
@@ -184,28 +218,35 @@ const loadExchangeRatesForUser = async (userId) => {
 
     Object.entries(mapping).forEach(([column, currency]) => {
       const value = data[column];
-      if (value === undefined || value === null) {
+      if (value === undefined || value === null || value === '') {
         return;
       }
       const numeric = Number(value);
-      if (Number.isFinite(numeric)) {
+      if (Number.isFinite(numeric) && numeric > 0) {
         normalizedRates[currency] = numeric;
+        if (currency === 'USD') {
+          meta.USD = {
+            value: numeric,
+            configured: true,
+            source: 'user',
+          };
+        }
       }
     });
 
-    return normalizedRates;
+    return { rates: normalizedRates, meta };
   } catch (err) {
     console.error('Unexpected error while loading exchange rates:', err);
-    return normalizedRates;
+    return { rates: normalizedRates, meta };
   }
 };
 
 exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
-  const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, researcher, page = 1, limit = 20 } = filters;
+  const { start_date, end_date, user_id, ebay_user_id, status, buyer_country_code, researcher, order_no, page = 1, limit = 20 } = filters;
 
   const offset = (page - 1) * limit;
 
-  const exchangeRates = await loadExchangeRatesForUser(user_id);
+  const { rates: exchangeRates } = await loadExchangeRatesForUser(user_id);
 
   // データ取得クエリ
   let query = supabase
@@ -221,9 +262,12 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
           earnings_after_pl_fee,
           earnings_after_pl_fee_currency,
           estimated_shipping_cost,
+          final_shipping_cost,
+          shipco_shipping_cost,
           subtotal,
           subtotal_currency,
           status,
+          shipping_status,
           buyer_country_code,
           researcher,
           order_line_items (*),
@@ -240,6 +284,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
   if (status) query = query.eq('status', status);
   if (buyer_country_code) query = query.eq('buyer_country_code', buyer_country_code);
   if (researcher) query = query.eq('researcher', researcher);
+  if (order_no) query = query.ilike('order_no', `%${order_no}%`);
   if (!isCSVDownload) query = query.range(offset, offset + limit - 1); // 通常のデータ取得時のみページングを適用
 
   const { data, error } = await query;
@@ -287,6 +332,8 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
   if (buyer_country_code) countQuery = countQuery.eq('buyer_country_code', buyer_country_code);
   if (researcher) countQuery = countQuery.eq('researcher', researcher);
 
+  if (order_no) countQuery = countQuery.ilike('order_no', `%${order_no}%`);
+
   const { count, error: countError } = await countQuery;
 
   if (countError) {
@@ -299,7 +346,7 @@ exports.fetchOrdersWithFilters = async (filters, isCSVDownload = false) => {
 
 
 exports.fetchOrderSummary = async (filters) => {
-  const { user_id, start_date, end_date, ebay_user_id, status, buyer_country_code, researcher } = filters;
+  const { user_id, start_date, end_date, ebay_user_id, status, buyer_country_code, researcher, order_no } = filters;
 
   if (!user_id) {
     throw new Error('User ID is required');
@@ -307,7 +354,7 @@ exports.fetchOrderSummary = async (filters) => {
 
   let query = supabase
     .from('orders')
-    .select('id, total_amount, total_amount_currency, earnings, earnings_currency, earnings_after_pl_fee, earnings_after_pl_fee_currency, subtotal, subtotal_currency, estimated_shipping_cost, researcher, order_line_items(*)')
+    .select('id, total_amount, total_amount_currency, earnings, earnings_currency, earnings_after_pl_fee, earnings_after_pl_fee_currency, subtotal, subtotal_currency, estimated_shipping_cost, final_shipping_cost, shipco_shipping_cost, buyer_country_code, researcher, order_line_items(*)')
     .eq('user_id', user_id)
     .neq('status', 'FULLY_REFUNDED')
     .neq('status', 'CANCELED')
@@ -318,17 +365,19 @@ exports.fetchOrderSummary = async (filters) => {
   if (status) query = query.eq('status', status);
   if (buyer_country_code) query = query.eq('buyer_country_code', buyer_country_code);
   if (researcher) query = query.eq('researcher', researcher);
+  if (order_no) query = query.ilike('order_no', `%${order_no}%`);
 
   const { data, error } = await query;
   if (error) throw error;
 
   const normalizedOrders = (data || []).map(attachNormalizedLineItemsToOrder);
 
-  const exchangeRates = await loadExchangeRatesForUser(user_id);
+  const { rates: exchangeRates, meta: exchangeRateMeta } = await loadExchangeRatesForUser(user_id);
 
   const summarySeed = {
     totalOrders: 0,
     totalSalesByCurrency: {},
+    totalSalesUsdConverted: 0,
     totalEarningsByCurrency: {},
     totalEarningsAfterFeeByCurrency: {},
     subtotalByCurrency: {},
@@ -338,6 +387,7 @@ exports.fetchOrderSummary = async (filters) => {
     earningsAfterFeeConvertedJpy: 0,
     profitSupportedCurrencies: new Set(),
     missingExchangeRates: new Set(),
+    missingSalesExchangeRates: new Set(),
     researcherIncentives: {},
   };
 
@@ -352,6 +402,17 @@ exports.fetchOrderSummary = async (filters) => {
 
     acc.totalShippingCostJpy += financials.shippingCostJpy;
     acc.totalCostPriceJpy += financials.costPriceJpy;
+
+    const salesUsd = convertAmountToUsd(
+      financials.totalAmount,
+      financials.totalAmountCurrency,
+      exchangeRates
+    );
+    if (salesUsd === null) {
+      acc.missingSalesExchangeRates.add(financials.totalAmountCurrency);
+    } else {
+      acc.totalSalesUsdConverted += salesUsd;
+    }
 
     if (financials.earningsAfterFeeJpy !== null) {
       acc.earningsAfterFeeConvertedJpy += financials.earningsAfterFeeJpy;
@@ -385,6 +446,7 @@ exports.fetchOrderSummary = async (filters) => {
     total_orders: summary.totalOrders,
     total_sales: totalSalesDefaultCurrency,
     total_sales_by_currency: summary.totalSalesByCurrency,
+    total_sales_usd_converted: summary.totalSalesUsdConverted,
     total_shipping_cost_jpy: summary.totalShippingCostJpy,
     total_cost_price_jpy: summary.totalCostPriceJpy,
     total_earnings_by_currency: summary.totalEarningsByCurrency,
@@ -397,7 +459,21 @@ exports.fetchOrderSummary = async (filters) => {
     profit_missing_exchange_rates: Array.from(summary.missingExchangeRates).filter(
       (currency) => currency && !summary.profitSupportedCurrencies.has(currency)
     ),
+    sales_missing_exchange_rates: Array.from(summary.missingSalesExchangeRates).filter(
+      (currency) => currency
+    ),
     researcher_incentives: summary.researcherIncentives,
+    exchange_rate_meta: {
+      usd_jpy: exchangeRateMeta?.USD || {
+        value: DEFAULT_USD_JPY,
+        configured: false,
+        source: 'default',
+      },
+    },
+    exchange_rate_warning:
+      exchangeRateMeta?.USD && exchangeRateMeta.USD.configured
+        ? null
+        : `為替が設定されていません。USD/JPYは${DEFAULT_USD_JPY}円で計算しています。`,
   };
 };
 

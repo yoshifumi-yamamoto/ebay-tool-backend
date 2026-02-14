@@ -13,7 +13,7 @@ const INCENTIVE_RATE = 0.1;
 const US_DUTY_RATE = 0.15;
 
 const ENV_EXCHANGE_RATES = {
-    USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 145,
+    USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
     EUR: Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null,
     CAD: Number(process.env.EXCHANGE_RATE_CAD_TO_JPY) || null,
     GBP: Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null,
