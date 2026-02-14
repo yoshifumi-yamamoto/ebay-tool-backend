@@ -1,4 +1,7 @@
 const supabase = require('../supabaseClient');
+const { Parser } = require('json2csv');
+const csv = require('csv-parser');
+const { Readable } = require('stream');
 
 const normalizeText = (value) => {
   if (value === undefined || value === null) return null;
@@ -25,16 +28,16 @@ const normalizeNumber = (value) => {
 const normalizeEmployeePayload = (payload = {}) => ({
   display_name: normalizeText(payload.display_name || payload.displayName),
   payroll_name: normalizeText(payload.payroll_name || payload.payrollName),
-  status: normalizeStatus(payload.status) || 'active',
+  status: normalizeStatus(payload.status) || null,
   incentive_rate: normalizeNumber(payload.incentive_rate ?? payload.incentiveRate),
-  paypay_bank_code: normalizeText(payload.paypay_bank_code || payload.paypayBankCode),
-  paypay_bank_name: normalizeText(payload.paypay_bank_name || payload.paypayBankName),
-  paypay_branch_code: normalizeText(payload.paypay_branch_code || payload.paypayBranchCode),
-  paypay_branch_name: normalizeText(payload.paypay_branch_name || payload.paypayBranchName),
-  paypay_account_type: normalizeText(payload.paypay_account_type || payload.paypayAccountType),
-  paypay_account_number: normalizeText(payload.paypay_account_number || payload.paypayAccountNumber),
-  paypay_account_name: normalizeText(payload.paypay_account_name || payload.paypayAccountName),
-  paypay_account_name_kana: normalizeText(payload.paypay_account_name_kana || payload.paypayAccountNameKana),
+  bank_code: normalizeText(payload.bank_code || payload.bankCode),
+  bank_name: normalizeText(payload.bank_name || payload.bankName),
+  branch_code: normalizeText(payload.branch_code || payload.branchCode),
+  branch_name: normalizeText(payload.branch_name || payload.branchName),
+  account_type: normalizeText(payload.account_type || payload.accountType),
+  account_number: normalizeText(payload.account_number || payload.accountNumber),
+  account_name: normalizeText(payload.account_name || payload.accountName),
+  account_name_kana: normalizeText(payload.account_name_kana || payload.accountNameKana),
 });
 
 async function listEmployees(userId) {
@@ -61,6 +64,9 @@ async function createEmployee(userId, payload = {}) {
   if (record.incentive_rate === null || record.incentive_rate === undefined) {
     record.incentive_rate = 0.1;
   }
+  if (!record.status) {
+    record.status = 'active';
+  }
   const { data, error } = await supabase
     .from('employees')
     .insert(record)
@@ -77,6 +83,9 @@ async function updateEmployee(userId, id, payload = {}) {
   updates.updated_at = new Date().toISOString();
   if (updates.incentive_rate === null || updates.incentive_rate === undefined) {
     delete updates.incentive_rate;
+  }
+  if (!updates.status) {
+    delete updates.status;
   }
   const { data, error } = await supabase
     .from('employees')
@@ -102,9 +111,131 @@ async function deleteEmployee(userId, id) {
   }
 }
 
+const parseCsvBuffer = (fileBuffer) =>
+  new Promise((resolve, reject) => {
+    const rows = [];
+    const stream = Readable.from(fileBuffer);
+    stream
+      .pipe(
+        csv({
+          mapHeaders: ({ header }) => header.trim().replace(/^"|"$/g, '').replace(/^\uFEFF/, ''),
+        })
+      )
+      .on('data', (data) => rows.push(data))
+      .on('end', () => resolve(rows))
+      .on('error', (error) => reject(error));
+  });
+
+const buildEmployeeUpdateFromRow = (row = {}) => {
+  const payload = normalizeEmployeePayload(row);
+  const updates = {};
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== '') {
+      updates[key] = value;
+    }
+  });
+  if (!updates.status) {
+    delete updates.status;
+  }
+  return updates;
+};
+
+async function downloadEmployeesCsv(userId) {
+  const employees = await listEmployees(userId);
+  const csvFields = [
+    'display_name',
+    'payroll_name',
+    'status',
+    'incentive_rate',
+    'bank_code',
+    'bank_name',
+    'branch_code',
+    'branch_name',
+    'account_type',
+    'account_number',
+    'account_name',
+    'account_name_kana',
+  ];
+  const parser = new Parser({ fields: csvFields });
+  return parser.parse(employees);
+}
+
+async function upsertEmployeesFromCsv(userId, fileBuffer) {
+  const rows = await parseCsvBuffer(fileBuffer);
+  const { data: existing, error } = await supabase
+    .from('employees')
+    .select('*')
+    .eq('user_id', userId);
+  if (error) {
+    throw new Error(`Failed to fetch employees: ${error.message}`);
+  }
+
+  const existingByName = new Map(
+    (existing || []).map((employee) => [employee.display_name, employee])
+  );
+  const summary = { created: 0, updated: 0, skipped: 0, errors: [] };
+
+  for (const row of rows) {
+    const displayName = normalizeText(row.display_name || row.displayName);
+    if (!displayName) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    const existingEmployee = existingByName.get(displayName);
+    const updates = buildEmployeeUpdateFromRow(row);
+
+    if (existingEmployee) {
+      if (Object.keys(updates).length === 0) {
+        summary.skipped += 1;
+        continue;
+      }
+      updates.updated_at = new Date().toISOString();
+      const { error: updateError } = await supabase
+        .from('employees')
+        .update(updates)
+        .eq('id', existingEmployee.id)
+        .eq('user_id', userId);
+      if (updateError) {
+        summary.errors.push({ display_name: displayName, error: updateError.message });
+      } else {
+        summary.updated += 1;
+      }
+      continue;
+    }
+
+    const payload = normalizeEmployeePayload(row);
+    payload.display_name = displayName;
+    payload.user_id = userId;
+    if (!payload.payroll_name) {
+      summary.errors.push({ display_name: displayName, error: 'payroll_name is required' });
+      continue;
+    }
+    if (payload.incentive_rate === null || payload.incentive_rate === undefined) {
+      payload.incentive_rate = 0.1;
+    }
+    if (!payload.status) {
+      payload.status = 'active';
+    }
+    const { error: insertError } = await supabase
+      .from('employees')
+      .insert(payload);
+    if (insertError) {
+      summary.errors.push({ display_name: displayName, error: insertError.message });
+    } else {
+      summary.created += 1;
+      existingByName.set(displayName, payload);
+    }
+  }
+
+  return summary;
+}
+
 module.exports = {
   listEmployees,
   createEmployee,
   updateEmployee,
   deleteEmployee,
+  downloadEmployeesCsv,
+  upsertEmployeesFromCsv,
 };

@@ -53,3 +53,34 @@ exports.deleteEmployee = async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 };
+
+exports.downloadEmployeesCsv = async (req, res) => {
+  const userId = Number(req.query.user_id || req.query.userId);
+  if (!userId) {
+    return res.status(400).json({ error: 'user_id is required' });
+  }
+  try {
+    const csvData = await employeeService.downloadEmployeesCsv(userId);
+    res.header('Content-Type', 'text/csv');
+    res.attachment(`employees_${userId}.csv`);
+    return res.send(csvData);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+exports.uploadEmployeesCsv = async (req, res) => {
+  const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);
+  if (!userId) {
+    return res.status(400).json({ error: 'user_id is required' });
+  }
+  if (!req.file?.buffer) {
+    return res.status(400).json({ error: 'file is required' });
+  }
+  try {
+    const summary = await employeeService.upsertEmployeesFromCsv(userId, req.file.buffer);
+    return res.json({ summary });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};

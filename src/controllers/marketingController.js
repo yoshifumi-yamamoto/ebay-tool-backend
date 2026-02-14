@@ -30,9 +30,9 @@ exports.getSendOfferEligible = async (req, res) => {
 };
 
 exports.bulkApplyPromotedListings = async (req, res) => {
-    const { accountIds, bidPercentage } = req.body || {};
+    const { accountIds, bidPercentage, endDate } = req.body || {};
     try {
-        const data = await bulkApplyPromotedListings({ accountIds, bidPercentage });
+        const data = await bulkApplyPromotedListings({ accountIds, bidPercentage, endDate });
         res.json(data);
     } catch (error) {
         res.status(400).json({ error: error.message || 'Failed to apply promoted listings' });
