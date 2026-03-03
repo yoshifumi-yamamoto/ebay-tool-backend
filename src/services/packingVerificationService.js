@@ -19,6 +19,7 @@ exports.fetchPackingVerification = async (filters = {}) => {
     shipping_carrier,
     order_no,
     tracking_number,
+    final_shipping_status = 'all',
   } = filters;
 
   if (!user_id) {
@@ -27,6 +28,9 @@ exports.fetchPackingVerification = async (filters = {}) => {
 
   const safeLimit = Number.isFinite(Number(limit)) ? Math.min(Number(limit), 500) : 200;
   const safeOffset = Number.isFinite(Number(offset)) ? Math.max(Number(offset), 0) : 0;
+  const normalizedFinalShippingStatus = String(final_shipping_status || 'all').toLowerCase();
+  const needsFinalShippingFilter =
+    normalizedFinalShippingStatus === 'confirmed' || normalizedFinalShippingStatus === 'unconfirmed';
 
   let query = supabase
     .from('orders')
@@ -35,6 +39,7 @@ exports.fetchPackingVerification = async (filters = {}) => {
       order_no,
       order_date,
       ebay_user_id,
+      buyer_country_code,
       status,
       shipping_status,
       shipping_tracking_number,
@@ -57,11 +62,10 @@ exports.fetchPackingVerification = async (filters = {}) => {
         title,
         item_image
       )
-    `, { count: 'exact' })
+    `, { count: needsFinalShippingFilter ? undefined : 'exact' })
     .eq('user_id', user_id)
     .eq('shipping_status', 'SHIPPED')
-    .order('order_date', { ascending: false })
-    .range(safeOffset, safeOffset + safeLimit - 1);
+    .order('order_date', { ascending: false });
 
   if (start_date) query = query.gte('order_date', start_date);
   if (end_date) query = query.lte('order_date', end_date);
@@ -69,6 +73,9 @@ exports.fetchPackingVerification = async (filters = {}) => {
   if (shipping_carrier) query = query.eq('shipping_carrier', shipping_carrier);
   if (order_no) query = query.ilike('order_no', `%${order_no}%`);
   if (tracking_number) query = query.ilike('shipping_tracking_number', `%${tracking_number}%`);
+  if (!needsFinalShippingFilter) {
+    query = query.range(safeOffset, safeOffset + safeLimit - 1);
+  }
 
   const { data, error, count } = await query;
   if (error) {
@@ -114,15 +121,85 @@ exports.fetchPackingVerification = async (filters = {}) => {
   }
 
   let carrierTotalsMap = {};
+  let carrierBreakdownMap = {};
+  let carrierShipmentMap = {};
   if (trackingNumbers.length > 0) {
-    const { data: carrierRows, error: carrierError } = await supabase
-      .from('v_carrier_awb_totals')
-      .select('awb_number, actual_total_amount')
+    const { data: shipmentRows, error: shipmentError } = await supabase
+      .from('carrier_shipments')
+      .select(`
+        id,
+        awb_number,
+        created_at,
+        carrier_actual_weight,
+        carrier_actual_weight_unit,
+        carrier_billed_weight,
+        carrier_billed_weight_unit,
+        carrier_dim_length,
+        carrier_dim_width,
+        carrier_dim_height,
+        carrier_dim_unit
+      `)
       .in('awb_number', trackingNumbers);
 
-    if (!carrierError && Array.isArray(carrierRows)) {
-      carrierTotalsMap = carrierRows.reduce((acc, row) => {
-        acc[row.awb_number] = row.actual_total_amount;
+    if (!shipmentError && Array.isArray(shipmentRows) && shipmentRows.length > 0) {
+      const shipmentIds = shipmentRows.map((row) => row.id).filter(Boolean);
+      const awbByShipmentId = shipmentRows.reduce((acc, row) => {
+        acc[row.id] = row.awb_number;
+        return acc;
+      }, {});
+
+      const { data: chargeRows, error: chargeError } = await supabase
+        .from('carrier_charges')
+        .select('shipment_id, charge_group, amount')
+        .in('shipment_id', shipmentIds);
+
+      if (!chargeError && Array.isArray(chargeRows)) {
+        carrierBreakdownMap = chargeRows.reduce((acc, row) => {
+          const awb = awbByShipmentId[row.shipment_id];
+          if (!awb) return acc;
+          if (!acc[awb]) {
+            acc[awb] = {
+              shipping_amount: 0,
+              other_amount: 0,
+              fee_amount: 0,
+              fee_tax_amount: 0,
+              duty_amount: 0,
+            };
+          }
+          const amount = toNumberOrNull(row.amount) || 0;
+          const group = String(row.charge_group || '').toLowerCase();
+          if (group === 'shipping') {
+            acc[awb].shipping_amount += amount;
+          } else if (group === 'other') {
+            acc[awb].other_amount += amount;
+          } else if (group === 'fee') {
+            acc[awb].fee_amount += amount;
+          } else if (group === 'fee_tax') {
+            acc[awb].fee_tax_amount += amount;
+          } else if (group === 'customs') {
+            acc[awb].duty_amount += amount;
+          }
+          return acc;
+        }, {});
+        carrierTotalsMap = Object.keys(carrierBreakdownMap).reduce((acc, awb) => {
+          const breakdown = carrierBreakdownMap[awb];
+          acc[awb] = (breakdown?.shipping_amount || 0) + (breakdown?.other_amount || 0);
+          return acc;
+        }, {});
+      }
+
+      carrierShipmentMap = shipmentRows.reduce((acc, row) => {
+        if (!row?.awb_number) return acc;
+        const existing = acc[row.awb_number];
+        if (!existing) {
+          acc[row.awb_number] = row;
+          return acc;
+        }
+        const existingTime = existing.created_at ? new Date(existing.created_at).getTime() : 0;
+        const rowTime = row.created_at ? new Date(row.created_at).getTime() : 0;
+        if (rowTime >= existingTime) {
+          acc[row.awb_number] = row;
+        }
         return acc;
       }, {});
     }
@@ -141,8 +218,7 @@ exports.fetchPackingVerification = async (filters = {}) => {
     return null;
   };
 
-  return {
-    data: rows.map((row) => ({
+  const mapped = rows.map((row) => ({
       ...row,
       item_title: (() => {
         const lineItems = row.order_line_items || [];
@@ -173,6 +249,41 @@ exports.fetchPackingVerification = async (filters = {}) => {
       final_shipping_cost:
         toNumberOrNull(row.final_shipping_cost) ??
         toNumberOrNull(carrierTotalsMap[row.shipping_tracking_number]),
+      confirmed_shipping_amount:
+        row.shipping_tracking_number ? toNumberOrNull(carrierBreakdownMap[row.shipping_tracking_number]?.shipping_amount) : null,
+      confirmed_other_amount:
+        row.shipping_tracking_number ? toNumberOrNull(carrierBreakdownMap[row.shipping_tracking_number]?.other_amount) : null,
+      confirmed_fee_amount:
+        row.shipping_tracking_number ? toNumberOrNull(carrierBreakdownMap[row.shipping_tracking_number]?.fee_amount) : null,
+      confirmed_fee_tax_amount:
+        row.shipping_tracking_number ? toNumberOrNull(carrierBreakdownMap[row.shipping_tracking_number]?.fee_tax_amount) : null,
+      confirmed_shipping_amount_incl_fee:
+        row.shipping_tracking_number
+          ? toNumberOrNull(
+            (carrierBreakdownMap[row.shipping_tracking_number]?.shipping_amount || 0)
+            + (carrierBreakdownMap[row.shipping_tracking_number]?.other_amount || 0)
+            + (carrierBreakdownMap[row.shipping_tracking_number]?.fee_amount || 0)
+            + (carrierBreakdownMap[row.shipping_tracking_number]?.fee_tax_amount || 0)
+          )
+          : null,
+      confirmed_duty_amount:
+        row.shipping_tracking_number ? toNumberOrNull(carrierBreakdownMap[row.shipping_tracking_number]?.duty_amount) : null,
+      carrier_actual_weight:
+        row.shipping_tracking_number ? toNumberOrNull(carrierShipmentMap[row.shipping_tracking_number]?.carrier_actual_weight) : null,
+      carrier_actual_weight_unit:
+        row.shipping_tracking_number ? (carrierShipmentMap[row.shipping_tracking_number]?.carrier_actual_weight_unit || null) : null,
+      carrier_billed_weight:
+        row.shipping_tracking_number ? toNumberOrNull(carrierShipmentMap[row.shipping_tracking_number]?.carrier_billed_weight) : null,
+      carrier_billed_weight_unit:
+        row.shipping_tracking_number ? (carrierShipmentMap[row.shipping_tracking_number]?.carrier_billed_weight_unit || null) : null,
+      carrier_dim_length:
+        row.shipping_tracking_number ? toNumberOrNull(carrierShipmentMap[row.shipping_tracking_number]?.carrier_dim_length) : null,
+      carrier_dim_width:
+        row.shipping_tracking_number ? toNumberOrNull(carrierShipmentMap[row.shipping_tracking_number]?.carrier_dim_width) : null,
+      carrier_dim_height:
+        row.shipping_tracking_number ? toNumberOrNull(carrierShipmentMap[row.shipping_tracking_number]?.carrier_dim_height) : null,
+      carrier_dim_unit:
+        row.shipping_tracking_number ? (carrierShipmentMap[row.shipping_tracking_number]?.carrier_dim_unit || null) : null,
       estimated_parcel_weight: resolveEstimatedValue(row, 'estimated_parcel_weight'),
       estimated_parcel_length: resolveEstimatedValue(row, 'estimated_parcel_length'),
       estimated_parcel_width: resolveEstimatedValue(row, 'estimated_parcel_width'),
@@ -181,8 +292,25 @@ exports.fetchPackingVerification = async (filters = {}) => {
       shipco_parcel_length: toNumberOrNull(row.shipco_parcel_length),
       shipco_parcel_width: toNumberOrNull(row.shipco_parcel_width),
       shipco_parcel_height: toNumberOrNull(row.shipco_parcel_height),
-    })),
-    total: count || 0,
+    }));
+
+  if (!needsFinalShippingFilter) {
+    return {
+      data: mapped,
+      total: count || 0,
+    };
+  }
+
+  const filtered = mapped.filter((row) => {
+    const hasConfirmed = row.final_shipping_cost !== null && row.final_shipping_cost !== undefined;
+    if (normalizedFinalShippingStatus === 'confirmed') return hasConfirmed;
+    if (normalizedFinalShippingStatus === 'unconfirmed') return !hasConfirmed;
+    return true;
+  });
+
+  return {
+    data: filtered.slice(safeOffset, safeOffset + safeLimit),
+    total: filtered.length,
   };
 };
 

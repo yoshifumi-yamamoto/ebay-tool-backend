@@ -2,11 +2,19 @@ const supabase = require('../supabaseClient');
 
 const QUADRANT_TABLE = 'priority_quadrants';
 const MEMO_TABLE = 'daily_memos';
+const STATUS_VALUES = new Set(['NEW', 'IN_PROGRESS', 'DONE']);
 
 const toNumber = (value) => {
   if (value === undefined || value === null || value === '') return 0;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const normalizeStatus = ({ status, is_done }) => {
+  if (status && STATUS_VALUES.has(status)) return status;
+  if (is_done === true) return 'DONE';
+  if (is_done === false) return 'NEW';
+  return 'NEW';
 };
 
 const listQuadrants = async ({ user_id }) => {
@@ -29,7 +37,8 @@ const createQuadrant = async (payload) => {
     detail: payload.detail || null,
     quadrant: payload.quadrant,
     due_date: payload.due_date || null,
-    is_done: payload.is_done ? true : false,
+    status: normalizeStatus(payload),
+    is_done: payload.is_done !== undefined ? Boolean(payload.is_done) : normalizeStatus(payload) === 'DONE',
     order_index: toNumber(payload.order_index),
   };
   const { data, error } = await supabase
@@ -48,10 +57,17 @@ const updateQuadrant = async (id, payload) => {
     detail: payload.detail,
     quadrant: payload.quadrant,
     due_date: payload.due_date,
+    status: payload.status && STATUS_VALUES.has(payload.status) ? payload.status : undefined,
     is_done: payload.is_done !== undefined ? Boolean(payload.is_done) : undefined,
     order_index: payload.order_index !== undefined ? toNumber(payload.order_index) : undefined,
     updated_at: new Date().toISOString(),
   };
+  if (updatePayload.status && updatePayload.is_done === undefined) {
+    updatePayload.is_done = updatePayload.status === 'DONE';
+  }
+  if (updatePayload.is_done !== undefined && updatePayload.status === undefined) {
+    updatePayload.status = updatePayload.is_done ? 'DONE' : 'NEW';
+  }
   Object.keys(updatePayload).forEach((key) => {
     if (updatePayload[key] === undefined) delete updatePayload[key];
   });

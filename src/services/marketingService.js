@@ -3,6 +3,7 @@ const supabase = require('../supabaseClient');
 const { getAccountById, refreshEbayToken } = require('./accountService');
 
 const EBAY_MARKETING_API_BASE = 'https://api.ebay.com/sell/marketing/v1';
+const PRL_ACCOUNT_CONCURRENCY = 4;
 
 async function getSendOfferEligibleItems(accountId, { limit = 20, offset = 0 } = {}) {
     if (!accountId) {
@@ -152,8 +153,7 @@ async function bulkApplyPromotedListings({ accountIds = [], bidPercentage, endDa
         throw new Error('endDate must be a valid date (YYYY-MM-DD)');
     }
 
-    const results = [];
-    for (const accountId of accountIds) {
+    const processAccount = async (accountId) => {
         try {
             const account = await getAccountById(accountId);
             if (!account) {
@@ -168,14 +168,13 @@ async function bulkApplyPromotedListings({ accountIds = [], bidPercentage, endDa
 
             const listingIds = await fetchActiveListingIds(account.user_id, account.ebay_user_id);
             if (listingIds.length === 0) {
-                results.push({
+                return {
                     accountId,
                     ebay_user_id: account.ebay_user_id,
                     campaignId: null,
                     createdAds: 0,
                     message: 'No active listings found',
-                });
-                continue;
+                };
             }
 
             const campaignId = await createPromotedCampaign(
@@ -196,18 +195,25 @@ async function bulkApplyPromotedListings({ accountIds = [], bidPercentage, endDa
                 createdAds += successes;
             }
 
-            results.push({
+            return {
                 accountId,
                 ebay_user_id: account.ebay_user_id,
                 campaignId,
                 createdAds,
-            });
+            };
         } catch (err) {
-            results.push({
+            return {
                 accountId,
                 error: err.message || 'Failed to apply promoted listings',
-            });
+            };
         }
+    };
+
+    const results = [];
+    for (let i = 0; i < accountIds.length; i += PRL_ACCOUNT_CONCURRENCY) {
+        const chunk = accountIds.slice(i, i + PRL_ACCOUNT_CONCURRENCY);
+        const chunkResults = await Promise.all(chunk.map((accountId) => processAccount(accountId)));
+        results.push(...chunkResults);
     }
     return { results };
 }

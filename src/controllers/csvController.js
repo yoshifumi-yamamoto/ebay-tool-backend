@@ -1,4 +1,12 @@
-const { updateCategoriesFromCSV, updateTrafficFromCSV, updateActiveListingsCSV, updateShippingCostsFromCSV, updateCarrierInvoicesFromCSV } = require('../services/csvService');
+const {
+    updateCategoriesFromCSV,
+    updateTrafficFromCSV,
+    updateActiveListingsCSV,
+    updateShippingCostsFromCSV,
+    updateCarrierInvoicesFromCSV,
+    fetchCarrierInvoiceAnomalies,
+    fetchCarrierInvoiceChargeDetails,
+} = require('../services/csvService');
 const { Readable } = require('stream');
 
 const processCSVUpload = async (req, res) => {
@@ -132,11 +140,13 @@ const processCarrierInvoicesCSVUpload = async (req, res) => {
     try {
         const results = [];
         for (const file of files) {
+            console.log(`[carrier-invoice] start import: ${file.originalname}`);
             const bufferStream = new Readable();
             bufferStream.push(file.buffer);
             bufferStream.push(null);
 
             const result = await updateCarrierInvoicesFromCSV(bufferStream, file.originalname);
+            console.log(`[carrier-invoice] completed import: ${file.originalname}`, JSON.stringify(result));
             results.push({ file: file.originalname, result });
         }
         res.status(200).json({ message: 'Carrier invoice CSV processed', results });
@@ -146,9 +156,48 @@ const processCarrierInvoicesCSVUpload = async (req, res) => {
     }
 };
 
+const getCarrierInvoiceAnomalies = async (req, res) => {
+    try {
+        const result = await fetchCarrierInvoiceAnomalies({
+            limit: req.query.limit,
+            page: req.query.page,
+            carrier: req.query.carrier,
+            severity: req.query.severity,
+            anomaly_code: req.query.anomaly_code,
+            tracking_number: req.query.tracking_number,
+            status: req.query.status,
+            from_date: req.query.from_date,
+            to_date: req.query.to_date,
+        });
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('Error fetching carrier invoice anomalies:', error.message);
+        res.status(500).json({ error: 'Error fetching carrier invoice anomalies' });
+    }
+};
+
+const getCarrierInvoiceChargeDetails = async (req, res) => {
+    try {
+        const result = await fetchCarrierInvoiceChargeDetails({
+            carrier: req.query.carrier,
+            awb_number: req.query.awb_number,
+            invoice_number: req.query.invoice_number,
+        });
+        res.status(200).json(result);
+    } catch (error) {
+        if (error.message === 'awb_number is required') {
+            return res.status(400).json({ error: error.message });
+        }
+        console.error('Error fetching carrier invoice charge details:', error.message);
+        res.status(500).json({ error: 'Error fetching carrier invoice charge details' });
+    }
+};
+
 module.exports = {
     processCSVUpload,
     processActiveListingsCSVUpload,
     processShippingCostsCSVUpload,
     processCarrierInvoicesCSVUpload,
+    getCarrierInvoiceAnomalies,
+    getCarrierInvoiceChargeDetails,
 };

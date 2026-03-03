@@ -22,7 +22,7 @@ async function getItems(req, res) {
 
 async function getItemsSimple(req, res) {
     try {
-        const { userId, listing_title, ebay_item_id, report_month, limit } = req.query;
+        const { userId, listing_title, ebay_item_id, sku, report_month, limit } = req.query;
         if (!userId) {
             return res.status(400).json({ error: 'userId is required' });
         }
@@ -30,6 +30,7 @@ async function getItemsSimple(req, res) {
             user_id: userId,
             listing_title,
             ebay_item_id,
+            sku,
             report_month,
             limit,
         });

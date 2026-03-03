@@ -75,6 +75,11 @@ async function fetchUsDutyOrders(userId, filters = {}) {
   const offset = page * limit;
   const orderNoFilter = filters.order_no ? String(filters.order_no).trim() : '';
   const ebayUserFilter = filters.ebay_user_id ? String(filters.ebay_user_id).trim() : '';
+  const trackingNumberFilter = filters.tracking_number ? String(filters.tracking_number).trim() : '';
+  const dutyStatusFilter = filters.duty_status ? String(filters.duty_status).trim().toLowerCase() : 'all';
+  const fromDateFilter = filters.from_date ? String(filters.from_date).trim() : '';
+  const toDateFilter = filters.to_date ? String(filters.to_date).trim() : '';
+  const needsConfirmedFilter = dutyStatusFilter === 'confirmed' || dutyStatusFilter === 'unconfirmed';
 
   let query = supabase
     .from('orders')
@@ -92,19 +97,31 @@ async function fetchUsDutyOrders(userId, filters = {}) {
       'earnings',
       'earnings_currency',
       'status',
+      'shipping_tracking_number',
       'order_line_items(title,item_image)',
       'line_items',
-    ].join(','), { count: 'exact' })
+    ].join(','), { count: needsConfirmedFilter ? undefined : 'exact' })
     .eq('user_id', userId)
     .eq('buyer_country_code', 'US')
-    .order('order_date', { ascending: false })
-    .range(offset, offset + limit - 1);
+    .order('order_date', { ascending: false });
 
   if (orderNoFilter) {
     query = query.ilike('order_no', `%${orderNoFilter}%`);
   }
   if (ebayUserFilter) {
     query = query.ilike('ebay_user_id', `%${ebayUserFilter}%`);
+  }
+  if (trackingNumberFilter) {
+    query = query.ilike('shipping_tracking_number', `%${trackingNumberFilter}%`);
+  }
+  if (fromDateFilter) {
+    query = query.gte('order_date', `${fromDateFilter}T00:00:00`);
+  }
+  if (toDateFilter) {
+    query = query.lte('order_date', `${toDateFilter}T23:59:59`);
+  }
+  if (!needsConfirmedFilter) {
+    query = query.range(offset, offset + limit - 1);
   }
 
   const { data, error, count } = await query;
@@ -116,42 +133,39 @@ async function fetchUsDutyOrders(userId, filters = {}) {
   const trackingNumbers = Array.from(
     new Set(rows.map((order) => order.shipping_tracking_number).filter(Boolean))
   );
-  let shipmentIdByAwb = {};
   let customsTotalByAwb = {};
+  let feeTaxTotalByAwb = {};
+  let feeInclTaxTotalByAwb = {};
+  let carrierByAwb = {};
   if (trackingNumbers.length > 0) {
-    const { data: shipments, error: shipmentsError } = await supabase
-      .from('carrier_shipments')
-      .select('id, awb_number')
+    const { data: totals, error: totalsError } = await supabase
+      .from('v_carrier_awb_totals')
+      .select('awb_number, carrier, actual_customs_amount, actual_fee_tax_amount, actual_fee_amount_incl_tax')
       .in('awb_number', trackingNumbers);
-    if (!shipmentsError && Array.isArray(shipments)) {
-      shipmentIdByAwb = shipments.reduce((acc, row) => {
-        if (row.awb_number) {
-          acc[row.awb_number] = row.id;
+    if (!totalsError && Array.isArray(totals)) {
+      customsTotalByAwb = totals.reduce((acc, row) => {
+        if (!row?.awb_number) return acc;
+        acc[row.awb_number] = toNumber(row.actual_customs_amount);
+        return acc;
+      }, {});
+      feeTaxTotalByAwb = totals.reduce((acc, row) => {
+        if (!row?.awb_number) return acc;
+        acc[row.awb_number] = toNumber(row.actual_fee_tax_amount);
+        return acc;
+      }, {});
+      feeInclTaxTotalByAwb = totals.reduce((acc, row) => {
+        if (!row?.awb_number) return acc;
+        acc[row.awb_number] = toNumber(row.actual_fee_amount_incl_tax);
+        return acc;
+      }, {});
+      carrierByAwb = totals.reduce((acc, row) => {
+        if (!row?.awb_number) return acc;
+        const carrier = typeof row.carrier === 'string' ? row.carrier.trim() : '';
+        if (carrier) {
+          acc[row.awb_number] = carrier;
         }
         return acc;
       }, {});
-      const shipmentIds = shipments.map((row) => row.id).filter(Boolean);
-      if (shipmentIds.length > 0) {
-        const { data: charges, error: chargesError } = await supabase
-          .from('carrier_charges')
-          .select('shipment_id, amount, charge_group')
-          .in('shipment_id', shipmentIds)
-          .eq('charge_group', 'customs');
-        if (!chargesError && Array.isArray(charges)) {
-          const awbByShipmentId = shipments.reduce((acc, row) => {
-            if (row.id && row.awb_number) {
-              acc[row.id] = row.awb_number;
-            }
-            return acc;
-          }, {});
-          customsTotalByAwb = charges.reduce((acc, charge) => {
-            const awb = awbByShipmentId[charge.shipment_id];
-            if (!awb) return acc;
-            acc[awb] = (acc[awb] || 0) + toNumber(charge.amount);
-            return acc;
-          }, {});
-        }
-      }
     }
   }
   const mapped = rows.map((order) => {
@@ -172,12 +186,31 @@ async function fetchUsDutyOrders(userId, filters = {}) {
     return {
       ...order,
       duty_jpy: dutyJpy,
+      shipping_carrier: trackingNumber ? carrierByAwb[trackingNumber] ?? null : null,
       confirmed_duty_jpy: trackingNumber ? customsTotalByAwb[trackingNumber] ?? null : null,
+      confirmed_fee_tax_jpy: trackingNumber ? feeTaxTotalByAwb[trackingNumber] ?? null : null,
+      confirmed_fee_incl_tax_jpy: trackingNumber ? feeInclTaxTotalByAwb[trackingNumber] ?? null : null,
       item_title: first.title || first.item_title || null,
       item_image: first.item_image || first.itemImage || null,
     };
   });
-  return { orders: mapped, total: count || 0 };
+  if (!needsConfirmedFilter) {
+    return { orders: mapped, total: count || 0 };
+  }
+
+  const filtered = mapped.filter((order) => {
+    const confirmedDuty = Number(order.confirmed_duty_jpy);
+    const isConfirmed = Number.isFinite(confirmedDuty) && confirmedDuty > 0;
+    if (dutyStatusFilter === 'confirmed') {
+      return isConfirmed;
+    }
+    if (dutyStatusFilter === 'unconfirmed') {
+      return !isConfirmed;
+    }
+    return true;
+  });
+  const paged = filtered.slice(offset, offset + limit);
+  return { orders: paged, total: filtered.length };
 }
 
 module.exports = {

@@ -1,8 +1,50 @@
 const csv = require('csv-parser');
+const { randomUUID } = require('crypto');
 const supabase = require('../supabaseClient');
 
 const batchSize = 100; // バッチサイズを設定
 const concurrencyLimit = 5; // 並行処理のリミットを設定
+const DEFAULT_CUSTOMS_RATIO_THRESHOLD = Number(process.env.CARRIER_ANOMALY_CUSTOMS_RATIO_THRESHOLD) || 0.5;
+const DEFAULT_FEE_RATIO_THRESHOLD = Number(process.env.CARRIER_ANOMALY_FEE_RATIO_THRESHOLD) || 0.35;
+const DEFAULT_UNKNOWN_OTHER_MIN_ABS_AMOUNT = Number(process.env.CARRIER_ANOMALY_UNKNOWN_OTHER_MIN_ABS_AMOUNT) || 300;
+const DEFAULT_OTHER_LABEL_ALLOWLIST = (
+    process.env.CARRIER_ANOMALY_OTHER_LABEL_ALLOWLIST ||
+    '割引額,discount,rebate'
+)
+    .split(',')
+    .map((v) => v.trim().toLowerCase())
+    .filter(Boolean);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isTransientFetchError(error) {
+    if (!error) return false;
+    const msg = String(error.message || error).toLowerCase();
+    return (
+        msg.includes('fetch failed') ||
+        msg.includes('network') ||
+        msg.includes('etimedout') ||
+        msg.includes('econnreset') ||
+        msg.includes('enotfound')
+    );
+}
+
+async function runWithRetry(task, label, maxAttempts = 3) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+            return await task();
+        } catch (error) {
+            lastError = error;
+            const shouldRetry = isTransientFetchError(error) && attempt < maxAttempts;
+            if (!shouldRetry) break;
+            const waitMs = 200 * attempt;
+            console.warn(`[carrier-invoice] retrying ${label} (${attempt}/${maxAttempts}) after transient error: ${error.message}`);
+            await sleep(waitMs);
+        }
+    }
+    throw lastError;
+}
 
 async function processBatches(updates, type) {
     const promises = [];
@@ -351,19 +393,113 @@ function normalizeDate(raw) {
     return str;
 }
 
+function normalizeUnit(raw) {
+    if (raw === undefined || raw === null) return null;
+    const unit = String(raw).trim();
+    return unit || null;
+}
+
+function parseDhlDimensions(raw) {
+    const input = String(raw || '').trim();
+    if (!input) {
+        return {
+            length: null,
+            width: null,
+            height: null,
+            unit: null,
+            raw: null,
+        };
+    }
+    const unitMatch = input.match(/[A-Za-z]+$/);
+    const unit = unitMatch ? unitMatch[0].toUpperCase() : null;
+    const normalized = input
+        .replace(/[A-Za-z]+$/g, '')
+        .trim()
+        .replace(/[xX＊*]/g, 'x');
+    const parts = normalized
+        .split('x')
+        .map((v) => normalizeAmount(v))
+        .filter((v) => v !== null);
+    return {
+        length: parts[0] ?? null,
+        width: parts[1] ?? null,
+        height: parts[2] ?? null,
+        unit,
+        raw: input,
+    };
+}
+
 function classifyFedexCharge(label) {
     if (!label) {
         return 'other';
     }
-    const lower = String(label).toLowerCase();
-    if (lower.includes('運送料金') || lower.includes('transportation') || lower.includes('freight')) {
+    const normalized = String(label).trim();
+    const lower = normalized.toLowerCase();
+
+    // Explicit mapping based on observed FedEx invoice labels.
+    const exactShippingLabels = new Set([
+        '運送料金',
+        '割引額',
+        '燃料割増金',
+        'Demand Surcharge',
+        '個人宅向け配達料',
+        '区分A地域外配達料',
+        '区分B地域外配達料',
+        '配達先訂正料',
+        '特別取扱料金 - 寸法',
+        '特別取扱料金 - 梱包',
+        '特別取扱料金 - 重量',
+        '従価料金',
+        '第三者請求',
+        '混雑時割増金',
+    ]);
+    const exactCustomsLabels = new Set([
+        '関税など',
+        'その他税金',
+        'カナダハーモナイズドセールス税',
+        'MEXICO IVA Freight',
+        '商業貨物税関使用料',
+        '保税貨物保管料',
+    ]);
+    const exactDutyFeeLabels = new Set([
+        '米国輸入手続き手数料',
+    ]);
+
+    if (exactShippingLabels.has(normalized)) {
         return 'shipping';
     }
-    if (lower.includes('duty') || lower.includes('税') || lower.includes('関税')) {
+    if (exactCustomsLabels.has(normalized)) {
         return 'customs';
     }
-    if (lower.includes('手数料') || lower.includes('fee') || lower.includes('surcharge')) {
+    if (exactDutyFeeLabels.has(normalized)) {
         return 'fee';
+    }
+
+    // Fallback heuristics for unknown future labels.
+    if (lower.includes('discount') || lower.includes('割引')) {
+        return 'shipping';
+    }
+    if (
+        lower.includes('surcharge') ||
+        lower.includes('割増') ||
+        lower.includes('配達料') ||
+        lower.includes('運送料金') ||
+        lower.includes('transportation') ||
+        lower.includes('freight')
+    ) {
+        return 'shipping';
+    }
+    if (lower.includes('duty') || lower.includes('関税') || lower.includes('税関')) {
+        return 'customs';
+    }
+    if (
+        (lower.includes('手数料') || lower.includes('fee')) &&
+        (lower.includes('輸入') || lower.includes('通関') || lower.includes('customs'))
+    ) {
+        return 'fee';
+    }
+    if (lower.includes('vat') || lower.includes('消費税') || lower.includes('税')) {
+        return 'customs';
     }
     return 'other';
 }
@@ -374,7 +510,19 @@ function classifyDhlCharge(label, taxCode) {
     }
     const lower = String(label || '').toLowerCase();
     const taxLower = String(taxCode || '').toLowerCase();
-    if (taxLower.includes('vat') || taxLower.includes('duty') || lower.includes('duty') || lower.includes('tax')) {
+    if (
+        taxLower.includes('vat') ||
+        taxLower.includes('duty') ||
+        lower.includes('duty') ||
+        lower.includes('duties') ||
+        lower.includes('customs')
+    ) {
+        return 'customs';
+    }
+    if (taxLower.includes('vat') || lower.includes('vat')) {
+        return 'fee_tax';
+    }
+    if (lower.includes('tax')) {
         return 'customs';
     }
     if (lower.includes('invoice fee') || lower.includes('other charges') || lower.includes('fee') || lower.includes('surcharge')) {
@@ -384,6 +532,18 @@ function classifyDhlCharge(label, taxCode) {
         return 'shipping';
     }
     return 'other';
+}
+
+function getDhlTotalAmountRaw(row) {
+    if (!row) return null;
+    return (
+        row['Total amount (incl. VAT)'] ??
+        row['Total amount (excl. VAT)'] ??
+        row['Total Amount (incl. VAT)'] ??
+        row['Total Amount (excl. VAT)'] ??
+        row['Total amount'] ??
+        null
+    );
 }
 
 async function upsertCarrierInvoice(payload) {
@@ -429,14 +589,376 @@ async function replaceCarrierCharges(shipmentId, charges) {
     }
 }
 
-async function processFedexRows(rows, sourceFileName) {
+async function insertCarrierInvoiceImportLogs(logs) {
+    if (!Array.isArray(logs) || logs.length === 0) {
+        return;
+    }
+    const { error } = await supabase
+        .from('carrier_invoice_import_logs')
+        .insert(logs);
+    if (error) {
+        console.error('[carrier-invoice] failed to insert import logs:', error.message);
+    }
+}
+
+function createChargeSummary() {
+    return {
+        total_count: 0,
+        total_amount: 0,
+        shipping_count: 0,
+        shipping_amount: 0,
+        customs_count: 0,
+        customs_amount: 0,
+        fee_count: 0,
+        fee_amount: 0,
+        fee_tax_count: 0,
+        fee_tax_amount: 0,
+        fee_amount_incl_tax: 0,
+        other_count: 0,
+        other_amount: 0,
+    };
+}
+
+function addChargeToSummary(summary, chargeGroup, amount) {
+    summary.total_count += 1;
+    summary.total_amount += amount;
+    if (chargeGroup === 'shipping') {
+        summary.shipping_count += 1;
+        summary.shipping_amount += amount;
+        return;
+    }
+    if (chargeGroup === 'customs') {
+        summary.customs_count += 1;
+        summary.customs_amount += amount;
+        return;
+    }
+    if (chargeGroup === 'fee') {
+        summary.fee_count += 1;
+        summary.fee_amount += amount;
+        summary.fee_amount_incl_tax += amount;
+        return;
+    }
+    if (chargeGroup === 'fee_tax') {
+        summary.fee_tax_count += 1;
+        summary.fee_tax_amount += amount;
+        summary.fee_amount_incl_tax += amount;
+        return;
+    }
+    summary.other_count += 1;
+    summary.other_amount += amount;
+}
+
+function summarizeCharges(charges) {
+    const summary = createChargeSummary();
+    (charges || []).forEach((charge) => {
+        if (charge?.amount === undefined || charge?.amount === null) {
+            return;
+        }
+        addChargeToSummary(summary, charge.charge_group, Number(charge.amount) || 0);
+    });
+    return summary;
+}
+
+function mergeChargeSummary(base, extra) {
+    const merged = createChargeSummary();
+    const keys = Object.keys(merged);
+    keys.forEach((key) => {
+        merged[key] = Number(base?.[key] || 0) + Number(extra?.[key] || 0);
+    });
+    return merged;
+}
+
+function mergeChargeDetails(base, extra) {
+    const left = Array.isArray(base) ? base : [];
+    const right = Array.isArray(extra) ? extra : [];
+    return [...left, ...right];
+}
+
+async function buildTrackingMatchSummary(awbSet) {
+    const awbNumbers = Array.from(awbSet).filter(Boolean);
+    if (awbNumbers.length === 0) {
+        return {
+            total_awb: 0,
+            matched_awb: 0,
+            unmatched_awb: 0,
+            unmatched_samples: [],
+        };
+    }
+
+    const matched = new Set();
+    const chunkSize = 500;
+    for (let i = 0; i < awbNumbers.length; i += chunkSize) {
+        const chunk = awbNumbers.slice(i, i + chunkSize);
+        const { data, error } = await supabase
+            .from('orders')
+            .select('shipping_tracking_number')
+            .in('shipping_tracking_number', chunk);
+        if (error) {
+            console.error('[carrier-invoice] failed to build tracking match summary:', error.message);
+            return {
+                total_awb: awbNumbers.length,
+                matched_awb: null,
+                unmatched_awb: null,
+                unmatched_samples: [],
+                match_error: error.message,
+            };
+        }
+        (data || []).forEach((row) => {
+            const value = row?.shipping_tracking_number;
+            if (value) {
+                matched.add(value);
+            }
+        });
+    }
+
+    const unmatched = awbNumbers.filter((awb) => !matched.has(awb));
+    return {
+        total_awb: awbNumbers.length,
+        matched_awb: matched.size,
+        unmatched_awb: unmatched.length,
+        unmatched_samples: unmatched.slice(0, 20),
+    };
+}
+
+async function loadOrderInfoByTrackingNumbers(awbNumbers) {
+    const result = {};
+    if (!Array.isArray(awbNumbers) || awbNumbers.length === 0) {
+        return result;
+    }
+    const chunkSize = 500;
+    for (let i = 0; i < awbNumbers.length; i += chunkSize) {
+        const chunk = awbNumbers.slice(i, i + chunkSize);
+        const { data, error } = await supabase
+            .from('orders')
+            .select('id, order_no, ebay_user_id, user_id, shipping_tracking_number, buyer_country_code')
+            .in('shipping_tracking_number', chunk);
+        if (error) {
+            console.error('[carrier-invoice] failed to load orders by tracking:', error.message);
+            continue;
+        }
+        (data || []).forEach((row) => {
+            if (!row?.shipping_tracking_number) {
+                return;
+            }
+            if (!result[row.shipping_tracking_number]) {
+                result[row.shipping_tracking_number] = row;
+            }
+        });
+    }
+    return result;
+}
+
+function buildShipmentAnomalies(shipment, orderInfo) {
+    const anomalies = [];
+    const customsRatioThreshold = DEFAULT_CUSTOMS_RATIO_THRESHOLD;
+    const feeRatioThreshold = DEFAULT_FEE_RATIO_THRESHOLD;
+    const shippingAmount = Number(shipment?.charge_summary?.shipping_amount) || 0;
+    const customsAmount = Number(shipment?.charge_summary?.customs_amount) || 0;
+    const feeAmount = Number(shipment?.charge_summary?.fee_amount) || 0;
+    const netShippingExcludingCustoms =
+        Number(shipment?.charge_summary?.total_amount) - customsAmount;
+    const buyerCountryCode = orderInfo?.buyer_country_code || null;
+
+    if (!orderInfo) {
+        anomalies.push({
+            anomaly_code: 'UNMATCHED_AWB',
+            severity: 'warning',
+            message: 'Tracking number did not match any order',
+        });
+    }
+
+    if (customsAmount > 0 && buyerCountryCode && buyerCountryCode !== 'US') {
+        anomalies.push({
+            anomaly_code: 'CUSTOMS_NON_US',
+            severity: 'high',
+            message: `Customs amount exists for non-US destination (${buyerCountryCode})`,
+        });
+    }
+
+    if (shippingAmount > 0 && feeAmount / shippingAmount > feeRatioThreshold) {
+        anomalies.push({
+            anomaly_code: 'HIGH_FEE_RATIO',
+            severity: 'medium',
+            message: `Fee ratio is high (${(feeAmount / shippingAmount * 100).toFixed(1)}%)`,
+        });
+    }
+
+    const customsRatioBase = shippingAmount > 0 ? shippingAmount : netShippingExcludingCustoms;
+    if (shippingAmount > 0 && customsAmount > 0 && customsRatioBase > 0 && customsAmount / customsRatioBase > customsRatioThreshold) {
+        anomalies.push({
+            anomaly_code: 'HIGH_CUSTOMS_RATIO',
+            severity: 'medium',
+            message: `Customs ratio is high (${(customsAmount / customsRatioBase * 100).toFixed(1)}%)`,
+        });
+    }
+
+    const unknownOtherCharges = (shipment.charge_details || []).filter((row) => {
+        const group = String(row?.charge_group || '').toLowerCase();
+        if (group !== 'other') return false;
+        const amount = Number(row?.amount || 0);
+        if (Math.abs(amount) < DEFAULT_UNKNOWN_OTHER_MIN_ABS_AMOUNT) return false;
+        const label = String(row?.charge_name_raw || '').toLowerCase();
+        if (!label) return true;
+        return !DEFAULT_OTHER_LABEL_ALLOWLIST.some((allowed) => label.includes(allowed));
+    });
+    if (unknownOtherCharges.length > 0) {
+        anomalies.push({
+            anomaly_code: 'UNKNOWN_OTHER_CHARGE',
+            severity: 'medium',
+            message: `Unknown other charge labels detected: ${unknownOtherCharges
+                .slice(0, 3)
+                .map((row) => row.charge_name_raw)
+                .join(', ')}`,
+        });
+    }
+
+    return anomalies;
+}
+
+async function upsertCarrierInvoiceAnomalies(anomalies) {
+    if (!Array.isArray(anomalies) || anomalies.length === 0) {
+        return { ok: true, error: null };
+    }
+    const nowIso = new Date().toISOString();
+    const payload = anomalies.map((row) => ({
+        shipment_id: row.shipment_id,
+        invoice_id: row.invoice_id,
+        carrier: row.carrier,
+        invoice_number: row.invoice_number,
+        awb_number: row.awb_number,
+        order_id: row.order_id,
+        order_no: row.order_no,
+        ebay_user_id: row.ebay_user_id,
+        buyer_country_code: row.buyer_country_code,
+        anomaly_code: row.anomaly_code,
+        severity: row.severity,
+        message: row.message,
+        shipping_amount: row.shipping_amount,
+        customs_amount: row.customs_amount,
+        fee_amount: row.fee_amount,
+        fee_tax_amount: row.fee_tax_amount,
+        fee_amount_incl_tax: row.fee_amount_incl_tax,
+        total_amount: row.total_amount,
+        details: row.details,
+        last_detected_at: nowIso,
+        resolved: false,
+        resolved_at: null,
+    }));
+    const { error } = await supabase
+        .from('carrier_invoice_anomalies')
+        .upsert(payload, { onConflict: 'shipment_id,anomaly_code' });
+    if (error) {
+        console.error('[carrier-invoice] failed to upsert anomalies:', error.message);
+        return { ok: false, error: error.message };
+    }
+    return { ok: true, error: null };
+}
+
+async function detectAndPersistCarrierAnomalies(shipments) {
+    const dedupedByShipment = new Map();
+    (shipments || []).forEach((row) => {
+        if (!row?.shipment_id) {
+            return;
+        }
+        const existing = dedupedByShipment.get(row.shipment_id);
+        if (!existing) {
+            dedupedByShipment.set(row.shipment_id, row);
+            return;
+        }
+        dedupedByShipment.set(row.shipment_id, {
+            ...existing,
+            charge_summary: mergeChargeSummary(existing.charge_summary, row.charge_summary),
+            charge_details: mergeChargeDetails(existing.charge_details, row.charge_details),
+        });
+    });
+    const dedupedShipments = Array.from(dedupedByShipment.values());
+
+    const awbNumbers = Array.from(
+        new Set((dedupedShipments || []).map((row) => row.awb_number).filter(Boolean))
+    );
+    const orderInfoByTracking = await loadOrderInfoByTrackingNumbers(awbNumbers);
+    const anomalies = [];
+
+    (dedupedShipments || []).forEach((shipment) => {
+        const orderInfo = shipment.awb_number ? orderInfoByTracking[shipment.awb_number] : null;
+        const shipmentAnomalies = buildShipmentAnomalies(shipment, orderInfo);
+        shipmentAnomalies.forEach((anomaly) => {
+            anomalies.push({
+                shipment_id: shipment.shipment_id,
+                invoice_id: shipment.invoice_id,
+                carrier: shipment.carrier,
+                invoice_number: shipment.invoice_number,
+                awb_number: shipment.awb_number,
+                order_id: orderInfo?.id || null,
+                order_no: orderInfo?.order_no || null,
+                ebay_user_id: orderInfo?.ebay_user_id || null,
+                buyer_country_code: orderInfo?.buyer_country_code || null,
+                anomaly_code: anomaly.anomaly_code,
+                severity: anomaly.severity,
+                message: anomaly.message,
+                shipping_amount: shipment.charge_summary.shipping_amount,
+                customs_amount: shipment.charge_summary.customs_amount,
+                fee_amount: shipment.charge_summary.fee_amount,
+                fee_tax_amount: shipment.charge_summary.fee_tax_amount,
+                fee_amount_incl_tax: shipment.charge_summary.fee_amount_incl_tax,
+                total_amount: shipment.charge_summary.total_amount,
+                details: {
+                    charge_summary: shipment.charge_summary,
+                },
+            });
+        });
+    });
+
+    const persistResult = await upsertCarrierInvoiceAnomalies(anomalies);
+    const bySeverity = anomalies.reduce((acc, row) => {
+        const key = row.severity || 'unknown';
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+    }, {});
+    return {
+        count: anomalies.length,
+        by_severity: bySeverity,
+        samples: anomalies.slice(0, 20),
+        persist_error: persistResult?.ok ? null : persistResult?.error || 'failed to persist anomalies',
+    };
+}
+
+async function processFedexRows(rows, sourceFileName, options = {}) {
+    const importRunId = options.importRunId || randomUUID();
+    const labelHeaderCount = Number(options.labelHeaderCount || 0);
+    const amountHeaderCount = Number(options.amountHeaderCount || 0);
+    if (labelHeaderCount !== amountHeaderCount) {
+        await insertCarrierInvoiceImportLogs([
+            {
+                carrier: 'FEDEX',
+                source_file_name: sourceFileName,
+                import_run_id: importRunId,
+                severity: 'error',
+                message: `FedEx duplicated header count mismatch: label=${labelHeaderCount}, amount=${amountHeaderCount}`,
+                context: { labelHeaderCount, amountHeaderCount },
+            },
+        ]);
+        throw new Error(`FedEx duplicated header count mismatch: label=${labelHeaderCount}, amount=${amountHeaderCount}`);
+    }
+
     let processed = 0;
+    let skippedMissingRequired = 0;
+    const awbSet = new Set();
+    const chargeSummary = createChargeSummary();
+    const shipmentSummaries = [];
+    const importLogs = [];
+    let totalDetectedChargePairs = 0;
+    let mismatchPairRows = 0;
+    let warningCount = 0;
+
     for (const row of rows) {
         const invoiceNumber = row['FedEx請求書番号'];
         const awb = row['航空貨物運送状番号'];
         if (!invoiceNumber || !awb) {
+            skippedMissingRequired += 1;
             continue;
         }
+        awbSet.add(awb);
         const invoiceId = await upsertCarrierInvoice({
             carrier: 'FEDEX',
             invoice_number: invoiceNumber,
@@ -451,6 +973,14 @@ async function processFedexRows(rows, sourceFileName) {
             shipment_date: normalizeDate(row['出荷日'] || row['出荷日（書式設定済）']),
             reference_1: row['荷送人参照1'] || null,
             shipment_total: normalizeAmount(row['航空貨物運送状の総額']),
+            carrier_actual_weight: normalizeAmount(row['実重量']),
+            carrier_actual_weight_unit: normalizeUnit(row['実重量単位']),
+            carrier_billed_weight: normalizeAmount(row['請求重量']),
+            carrier_billed_weight_unit: normalizeUnit(row['請求重量単位']),
+            carrier_dim_length: normalizeAmount(row['Dim長さ']),
+            carrier_dim_width: normalizeAmount(row['Dim幅']),
+            carrier_dim_height: normalizeAmount(row['Dim高さ']),
+            carrier_dim_unit: normalizeUnit(row['Dim単位']),
         });
 
         const labelMap = {};
@@ -465,40 +995,140 @@ async function processFedexRows(rows, sourceFileName) {
                 amountMap[Number(amountMatch[1])] = value;
             }
         });
-        const indices = Array.from(new Set([...Object.keys(labelMap), ...Object.keys(amountMap)]))
+        const labelIndices = Object.keys(labelMap)
             .map(Number)
             .sort((a, b) => a - b);
+        const amountIndices = Object.keys(amountMap)
+            .map(Number)
+            .sort((a, b) => a - b);
+        totalDetectedChargePairs += Math.max(labelIndices.length, amountIndices.length);
+
+        if (labelIndices.length !== amountIndices.length) {
+            mismatchPairRows += 1;
+            warningCount += 1;
+            importLogs.push({
+                carrier: 'FEDEX',
+                source_file_name: sourceFileName,
+                import_run_id: importRunId,
+                invoice_number: invoiceNumber,
+                awb_number: awb,
+                severity: 'warning',
+                message: `label/amount occurrence mismatch in row: label=${labelIndices.length}, amount=${amountIndices.length}`,
+                context: {
+                    labelIndices,
+                    amountIndices,
+                },
+            });
+        }
+
         const charges = [];
-        indices.forEach((index, idx) => {
-            const label = labelMap[index];
-            const amount = normalizeAmount(amountMap[index]);
-            if (!label || amount === null || amount === 0) {
-                return;
+        const pairCount = Math.max(labelIndices.length, amountIndices.length);
+        for (let idx = 0; idx < pairCount; idx += 1) {
+            const occurrenceNo = idx + 1;
+            const labelIndex = labelIndices[idx];
+            const amountIndex = amountIndices[idx];
+            const label = labelIndex !== undefined ? labelMap[labelIndex] : null;
+            const amountRaw = amountIndex !== undefined ? amountMap[amountIndex] : null;
+            const amount = normalizeAmount(amountRaw);
+            const hasLabel = label !== undefined && label !== null && String(label).trim() !== '';
+            const hasAmountRaw = amountRaw !== undefined && amountRaw !== null && String(amountRaw).trim() !== '';
+
+            if (!hasLabel && !hasAmountRaw) {
+                continue;
             }
+            if (!hasLabel || !hasAmountRaw || amount === null) {
+                warningCount += 1;
+                importLogs.push({
+                    carrier: 'FEDEX',
+                    source_file_name: sourceFileName,
+                    import_run_id: importRunId,
+                    invoice_number: invoiceNumber,
+                    awb_number: awb,
+                    row_no: processed + skippedMissingRequired + 1,
+                    header_occurrence_no: occurrenceNo,
+                    charge_name_raw: hasLabel ? String(label) : null,
+                    raw_amount: hasAmountRaw ? String(amountRaw) : null,
+                    severity: 'warning',
+                    message: 'Invalid or incomplete duplicated FedEx charge pair',
+                    context: {
+                        labelIndex,
+                        amountIndex,
+                        parsedAmount: amount,
+                    },
+                });
+                continue;
+            }
+            if (amount === 0) {
+                continue;
+            }
+            const chargeGroup = classifyFedexCharge(String(label));
             charges.push({
                 shipment_id: shipmentId,
-                charge_group: classifyFedexCharge(label),
-                charge_name_raw: label,
+                charge_group: chargeGroup,
+                charge_name_raw: String(label),
                 amount,
                 invoice_category: row['請求書の種類'] || null,
-                line_no: idx + 1,
+                header_occurrence_no: occurrenceNo,
+                line_no: occurrenceNo,
             });
-        });
+            addChargeToSummary(chargeSummary, chargeGroup, amount);
+        }
         await replaceCarrierCharges(shipmentId, charges);
+        shipmentSummaries.push({
+            shipment_id: shipmentId,
+            invoice_id: invoiceId,
+            carrier: 'FEDEX',
+            invoice_number: invoiceNumber,
+            awb_number: awb,
+            charge_summary: summarizeCharges(charges),
+            charge_details: charges.map((charge) => ({
+                charge_group: charge.charge_group,
+                charge_name_raw: charge.charge_name_raw,
+                amount: charge.amount,
+            })),
+        });
         processed += 1;
     }
-    return { processed };
+    await insertCarrierInvoiceImportLogs(importLogs);
+    const trackingMatch = await buildTrackingMatchSummary(awbSet);
+    const anomalySummary = await detectAndPersistCarrierAnomalies(shipmentSummaries);
+    const result = {
+        carrier: 'FEDEX',
+        source_file_name: sourceFileName,
+        import_run_id: importRunId,
+        total_rows: rows.length,
+        processed_shipments: processed,
+        skipped_rows_missing_required: skippedMissingRequired,
+        fedex_charge_pairs: {
+            detected_pairs: totalDetectedChargePairs,
+            rows_with_pair_mismatch: mismatchPairRows,
+        },
+        import_log_summary: {
+            total_warnings: warningCount,
+        },
+        charge_summary: chargeSummary,
+        tracking_match: trackingMatch,
+        anomalies: anomalySummary,
+    };
+    console.log('[carrier-invoice] import summary:', JSON.stringify(result));
+    return result;
 }
 
 async function processDhlRows(rows, sourceFileName) {
     let processed = 0;
+    let skippedMissingRequired = 0;
     const grouped = new Map();
+    const awbSet = new Set();
+    const chargeSummary = createChargeSummary();
+    const shipmentSummaries = [];
     rows.forEach((row) => {
         const invoiceNumber = row['Invoice Number'];
         const awb = row['Shipment Number'];
         if (!invoiceNumber || !awb) {
+            skippedMissingRequired += 1;
             return;
         }
+        awbSet.add(awb);
         const key = `${invoiceNumber}::${awb}`;
         if (!grouped.has(key)) {
             grouped.set(key, []);
@@ -517,12 +1147,23 @@ async function processDhlRows(rows, sourceFileName) {
             billing_account: firstRow['Billing Account'] || null,
             source_file_name: sourceFileName,
         });
+        const dhlDimensions = parseDhlDimensions(firstRow['Dimensions']);
         const shipmentId = await upsertCarrierShipment({
             invoice_id: invoiceId,
             awb_number: awb,
             shipment_date: normalizeDate(firstRow['Shipment Date']),
             reference_1: firstRow['Shipment Reference 1'] || null,
-            shipment_total: normalizeAmount(firstRow['Total amount (excl. VAT)']),
+            shipment_total: normalizeAmount(getDhlTotalAmountRaw(firstRow)),
+            carrier_actual_weight: normalizeAmount(firstRow['DHL Scale Weight (B)']) ?? normalizeAmount(firstRow['Cust Scale Weight (A)']),
+            carrier_actual_weight_unit: 'KG',
+            carrier_billed_weight: normalizeAmount(firstRow['Weight (kg)']) ?? normalizeAmount(firstRow['DHL Vol Weight (W)']),
+            carrier_billed_weight_unit: 'KG',
+            carrier_dim_length: dhlDimensions.length,
+            carrier_dim_width: dhlDimensions.width,
+            carrier_dim_height: dhlDimensions.height,
+            carrier_dim_unit: dhlDimensions.unit,
+            carrier_weight_flag: firstRow['Weight Flag'] || null,
+            carrier_dimensions_raw: dhlDimensions.raw,
         });
 
         const charges = [];
@@ -532,21 +1173,23 @@ async function processDhlRows(rows, sourceFileName) {
             if (parsed === null || parsed === 0) {
                 return;
             }
+            const chargeGroup = classifyDhlCharge(name, taxCode);
             charges.push({
                 shipment_id: shipmentId,
-                charge_group: classifyDhlCharge(name, taxCode),
+                charge_group: chargeGroup,
                 charge_name_raw: name,
                 amount: parsed,
                 charge_code: code,
                 line_no: lineNo,
             });
+            addChargeToSummary(chargeSummary, chargeGroup, parsed);
             lineNo += 1;
         };
 
         groupRows.forEach((row) => {
             const product = String(row['Product'] || '').toLowerCase();
             if (product.includes('duties') || product.includes('tax')) {
-                pushCharge(row['Product Name'] || 'DUTIES & TAXES', row['Total amount (excl. VAT)'], row['Product'], row['Tax Code']);
+                pushCharge(row['Product Name'] || 'DUTIES & TAXES', getDhlTotalAmountRaw(row), row['Product'], row['Tax Code']);
             }
             pushCharge('Weight Charge', row['Weight Charge'], null, row['Tax Code']);
             pushCharge('Invoice Fee', row['Invoice Fee'], null, row['Tax Code']);
@@ -565,9 +1208,35 @@ async function processDhlRows(rows, sourceFileName) {
         });
 
         await replaceCarrierCharges(shipmentId, charges);
+        shipmentSummaries.push({
+            shipment_id: shipmentId,
+            invoice_id: invoiceId,
+            carrier: 'DHL',
+            invoice_number: invoiceNumber,
+            awb_number: awb,
+            charge_summary: summarizeCharges(charges),
+            charge_details: charges.map((charge) => ({
+                charge_group: charge.charge_group,
+                charge_name_raw: charge.charge_name_raw,
+                amount: charge.amount,
+            })),
+        });
         processed += 1;
     }
-    return { processed };
+    const trackingMatch = await buildTrackingMatchSummary(awbSet);
+    const anomalySummary = await detectAndPersistCarrierAnomalies(shipmentSummaries);
+    const result = {
+        carrier: 'DHL',
+        source_file_name: sourceFileName,
+        total_rows: rows.length,
+        processed_shipments: processed,
+        skipped_rows_missing_required: skippedMissingRequired,
+        charge_summary: chargeSummary,
+        tracking_match: trackingMatch,
+        anomalies: anomalySummary,
+    };
+    console.log('[carrier-invoice] import summary:', JSON.stringify(result));
+    return result;
 }
 
 async function updateCarrierInvoicesFromCSV(fileBuffer, sourceFileName) {
@@ -593,8 +1262,15 @@ async function updateCarrierInvoicesFromCSV(fileBuffer, sourceFileName) {
                     if (!isFedex && !isDhl) {
                         throw new Error('Unknown carrier CSV format');
                     }
+                    const labelHeaderCount = rawHeaders.filter((h) => h === '航空貨物運送状の請求ラベル').length;
+                    const amountHeaderCount = rawHeaders.filter((h) => h === '航空貨物運送状の請求額').length;
+                    const importRunId = randomUUID();
                     const result = isFedex
-                        ? await processFedexRows(rows, sourceFileName)
+                        ? await processFedexRows(rows, sourceFileName, {
+                            importRunId,
+                            labelHeaderCount,
+                            amountHeaderCount,
+                        })
                         : await processDhlRows(rows, sourceFileName);
                     resolve(result);
                 } catch (error) {
@@ -605,10 +1281,145 @@ async function updateCarrierInvoicesFromCSV(fileBuffer, sourceFileName) {
     });
 }
 
+async function fetchCarrierInvoiceAnomalies(filters = {}) {
+    const limit = Number.isFinite(Number(filters.limit)) ? Math.min(Number(filters.limit), 200) : 50;
+    const page = Number.isFinite(Number(filters.page)) ? Math.max(Number(filters.page), 0) : 0;
+    const offset = page * limit;
+    const {
+        carrier,
+        severity,
+        anomaly_code,
+        tracking_number,
+        status,
+        from_date,
+        to_date,
+    } = filters;
+
+    let query = supabase
+        .from('carrier_invoice_anomalies')
+        .select('*', { count: 'exact' })
+        .order('last_detected_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+
+    if (carrier) query = query.eq('carrier', carrier);
+    if (severity) query = query.eq('severity', severity);
+    if (anomaly_code) query = query.eq('anomaly_code', anomaly_code);
+    if (tracking_number) query = query.ilike('awb_number', `%${tracking_number}%`);
+    if (status === 'open') query = query.eq('resolved', false);
+    if (status === 'resolved') query = query.eq('resolved', true);
+    if (from_date) query = query.gte('last_detected_at', `${from_date}T00:00:00`);
+    if (to_date) query = query.lte('last_detected_at', `${to_date}T23:59:59`);
+
+    const { data, error, count } = await query;
+    if (error) {
+        throw new Error(`failed to fetch carrier invoice anomalies: ${error.message}`);
+    }
+    return {
+        rows: data || [],
+        total: count || 0,
+    };
+}
+
+async function fetchCarrierInvoiceChargeDetails(filters = {}) {
+    const carrier = filters.carrier ? String(filters.carrier).trim().toUpperCase() : '';
+    const awbNumber = filters.awb_number ? String(filters.awb_number).trim() : '';
+    const invoiceNumber = filters.invoice_number ? String(filters.invoice_number).trim() : '';
+    if (!awbNumber) {
+        throw new Error('awb_number is required');
+    }
+
+    const { data: shipments, error: shipmentError } = await runWithRetry(
+        async () => supabase
+            .from('carrier_shipments')
+            .select('id, awb_number, shipment_date, reference_1, shipment_total, invoice_id')
+            .eq('awb_number', awbNumber),
+        'fetch carrier_shipments by awb'
+    );
+    if (shipmentError) {
+        throw new Error(`failed to fetch carrier shipments: ${shipmentError.message}`);
+    }
+    if (!shipments || shipments.length === 0) {
+        return { shipment: null, charges: [] };
+    }
+
+    const invoiceIds = Array.from(new Set(shipments.map((s) => s.invoice_id).filter(Boolean)));
+    const { data: invoices, error: invoiceError } = await runWithRetry(
+        async () => supabase
+            .from('carrier_invoices')
+            .select('id, carrier, invoice_number, invoice_date, currency, billing_account, source_file_name')
+            .in('id', invoiceIds),
+        'fetch carrier_invoices by ids'
+    );
+    if (invoiceError) {
+        throw new Error(`failed to fetch carrier invoices: ${invoiceError.message}`);
+    }
+    const invoiceById = (invoices || []).reduce((acc, row) => {
+        acc[row.id] = row;
+        return acc;
+    }, {});
+
+    const candidates = shipments
+        .map((shipment) => ({
+            ...shipment,
+            invoice: invoiceById[shipment.invoice_id] || null,
+        }))
+        .filter((row) => {
+            if (carrier && row.invoice?.carrier !== carrier) return false;
+            if (invoiceNumber && row.invoice?.invoice_number !== invoiceNumber) return false;
+            return true;
+        });
+    if (candidates.length === 0) {
+        return { shipment: null, charges: [] };
+    }
+
+    candidates.sort((a, b) => {
+        const aDate = a.invoice?.invoice_date || '';
+        const bDate = b.invoice?.invoice_date || '';
+        if (aDate !== bDate) return aDate < bDate ? 1 : -1;
+        const aNo = a.invoice?.invoice_number || '';
+        const bNo = b.invoice?.invoice_number || '';
+        return aNo < bNo ? 1 : -1;
+    });
+    const target = candidates[0];
+
+    const { data: charges, error: chargeError } = await runWithRetry(
+        async () => supabase
+            .from('carrier_charges')
+            .select('id, charge_group, charge_name_raw, amount, charge_code, invoice_category, header_occurrence_no, line_no')
+            .eq('shipment_id', target.id)
+            .order('header_occurrence_no', { ascending: true, nullsFirst: false })
+            .order('line_no', { ascending: true, nullsFirst: false }),
+        'fetch carrier_charges by shipment_id'
+    );
+    if (chargeError) {
+        throw new Error(`failed to fetch carrier charges: ${chargeError.message}`);
+    }
+
+    return {
+        shipment: {
+            shipment_id: target.id,
+            awb_number: target.awb_number,
+            shipment_date: target.shipment_date,
+            reference_1: target.reference_1,
+            shipment_total: target.shipment_total,
+            invoice_id: target.invoice_id,
+            carrier: target.invoice?.carrier || null,
+            invoice_number: target.invoice?.invoice_number || null,
+            invoice_date: target.invoice?.invoice_date || null,
+            currency: target.invoice?.currency || null,
+            billing_account: target.invoice?.billing_account || null,
+            source_file_name: target.invoice?.source_file_name || null,
+        },
+        charges: charges || [],
+    };
+}
+
 module.exports = {
     updateCategoriesFromCSV,
     updateTrafficFromCSV,
     updateActiveListingsCSV,
     updateShippingCostsFromCSV,
-    updateCarrierInvoicesFromCSV
+    updateCarrierInvoicesFromCSV,
+    fetchCarrierInvoiceAnomalies,
+    fetchCarrierInvoiceChargeDetails,
 };

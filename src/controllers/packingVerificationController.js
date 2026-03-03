@@ -12,6 +12,7 @@ exports.getPackingVerification = async (req, res) => {
     shipping_carrier,
     order_no,
     tracking_number,
+    final_shipping_status,
   } = req.query;
 
   try {
@@ -25,6 +26,7 @@ exports.getPackingVerification = async (req, res) => {
       shipping_carrier,
       order_no,
       tracking_number,
+      final_shipping_status,
     });
     res.json(result);
   } catch (error) {

@@ -34,5 +34,8 @@ router.post('/upload-carrier-invoices', upload.array('files', 20), (req, res, ne
   next();
 }, csvController.processCarrierInvoicesCSVUpload);
 
+router.get('/carrier-invoice-anomalies', csvController.getCarrierInvoiceAnomalies);
+router.get('/carrier-invoice-charge-details', csvController.getCarrierInvoiceChargeDetails);
+
 
 module.exports = router;

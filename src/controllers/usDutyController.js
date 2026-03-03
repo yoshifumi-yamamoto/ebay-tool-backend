@@ -11,6 +11,10 @@ exports.getUsDutyOrders = async (req, res) => {
       page: req.query.page,
       order_no: req.query.order_no,
       ebay_user_id: req.query.ebay_user_id,
+      tracking_number: req.query.tracking_number,
+      duty_status: req.query.duty_status,
+      from_date: req.query.from_date,
+      to_date: req.query.to_date,
     });
     return res.json({ orders, total });
   } catch (err) {
