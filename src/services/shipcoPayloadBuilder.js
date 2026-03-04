@@ -2,7 +2,15 @@ const buildShipcoAddress = (shipTo = {}) => {
   const contact = shipTo.contactAddress || shipTo.contact_address || {};
   return {
     full_name: shipTo.fullName || shipTo.full_name || shipTo.name || null,
-    phone: shipTo.phoneNumber || shipTo.phone || contact.phone || null,
+    phone:
+      shipTo.phoneNumber ||
+      shipTo.phone_number ||
+      shipTo.phone ||
+      shipTo.primaryPhone?.phoneNumber ||
+      shipTo.primary_phone?.phone_number ||
+      shipTo.primaryPhone?.phoneNumberNational ||
+      contact.phone ||
+      null,
     email: shipTo.email || contact.email || null,
     company: contact.companyName || contact.company || null,
     country: contact.countryCode || shipTo.countryCode || shipTo.country || null,

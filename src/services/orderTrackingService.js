@@ -191,11 +191,13 @@ async function uploadTrackingInfoToEbay({
   }
 
   const nextShippingStatus = statusOverride || 'SHIPPED';
+  const shipmentRecordedAt = nextShippingStatus === 'SHIPPED' ? new Date().toISOString() : null;
   const { data: updatedOrder, error: updateError } = await supabase
     .from('orders')
     .update({
       shipping_tracking_number: trackingNumber,
       shipping_status: nextShippingStatus,
+      ...(shipmentRecordedAt ? { shipment_recorded_at: shipmentRecordedAt } : {}),
     })
     .eq('order_no', orderNo)
     .select('*, order_line_items(*)')

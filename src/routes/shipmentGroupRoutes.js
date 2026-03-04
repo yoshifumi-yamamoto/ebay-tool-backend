@@ -6,6 +6,8 @@ const router = express.Router();
 router.get('/', shipmentGroupController.listShipmentGroups);
 router.get('/:id', shipmentGroupController.getShipmentGroup);
 router.post('/', shipmentGroupController.createShipmentGroup);
+router.delete('/:id', shipmentGroupController.dissolveShipmentGroup);
+router.delete('/:id/orders/:orderNo', shipmentGroupController.removeOrderFromShipmentGroup);
 router.post('/:id/rates', shipmentGroupController.estimateRates);
 router.post('/:id/ship', shipmentGroupController.createShipment);
 

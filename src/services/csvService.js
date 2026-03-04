@@ -748,6 +748,73 @@ async function loadOrderInfoByTrackingNumbers(awbNumbers) {
     return result;
 }
 
+async function markOrdersReconciledByShipments(shipmentSummaries) {
+    const summaries = Array.isArray(shipmentSummaries) ? shipmentSummaries : [];
+    const awbToFlags = summaries.reduce((acc, shipment) => {
+        const awb = shipment?.awb_number;
+        if (!awb) {
+            return acc;
+        }
+        const chargeSummary = shipment?.charge_summary || {};
+        const hasShippingCharge =
+            Number(chargeSummary.shipping_amount || 0) !== 0 ||
+            Number(chargeSummary.other_amount || 0) !== 0 ||
+            Number(chargeSummary.fee_amount || 0) !== 0 ||
+            Number(chargeSummary.fee_tax_amount || 0) !== 0;
+        const hasCustomsCharge = Number(chargeSummary.customs_amount || 0) !== 0;
+        if (!acc[awb]) {
+            acc[awb] = { shipping: false, duty: false };
+        }
+        if (hasShippingCharge) {
+            acc[awb].shipping = true;
+        }
+        if (hasCustomsCharge) {
+            acc[awb].duty = true;
+        }
+        return acc;
+    }, {});
+
+    const entries = Object.entries(awbToFlags);
+    if (entries.length === 0) {
+        return { updated_shipping: 0, updated_duty: 0 };
+    }
+
+    let updatedShipping = 0;
+    let updatedDuty = 0;
+    const nowIso = new Date().toISOString();
+
+    for (const [awb, flags] of entries) {
+        const updatePayload = {};
+        if (flags.shipping) {
+            updatePayload.shipping_reconciled_at = nowIso;
+        }
+        if (flags.duty) {
+            updatePayload.duty_reconciled_at = nowIso;
+        }
+        if (Object.keys(updatePayload).length === 0) {
+            continue;
+        }
+        const { data, error } = await supabase
+            .from('orders')
+            .update(updatePayload)
+            .eq('shipping_tracking_number', awb)
+            .select('id');
+        if (error) {
+            console.error('[carrier-invoice] failed to mark order reconciled:', error.message, { awb });
+            continue;
+        }
+        const affected = Array.isArray(data) ? data.length : 0;
+        if (flags.shipping) {
+            updatedShipping += affected;
+        }
+        if (flags.duty) {
+            updatedDuty += affected;
+        }
+    }
+
+    return { updated_shipping: updatedShipping, updated_duty: updatedDuty };
+}
+
 function buildShipmentAnomalies(shipment, orderInfo) {
     const anomalies = [];
     const customsRatioThreshold = DEFAULT_CUSTOMS_RATIO_THRESHOLD;
@@ -1091,6 +1158,7 @@ async function processFedexRows(rows, sourceFileName, options = {}) {
     }
     await insertCarrierInvoiceImportLogs(importLogs);
     const trackingMatch = await buildTrackingMatchSummary(awbSet);
+    const reconciledSummary = await markOrdersReconciledByShipments(shipmentSummaries);
     const anomalySummary = await detectAndPersistCarrierAnomalies(shipmentSummaries);
     const result = {
         carrier: 'FEDEX',
@@ -1108,6 +1176,7 @@ async function processFedexRows(rows, sourceFileName, options = {}) {
         },
         charge_summary: chargeSummary,
         tracking_match: trackingMatch,
+        reconciled_orders: reconciledSummary,
         anomalies: anomalySummary,
     };
     console.log('[carrier-invoice] import summary:', JSON.stringify(result));
@@ -1224,6 +1293,7 @@ async function processDhlRows(rows, sourceFileName) {
         processed += 1;
     }
     const trackingMatch = await buildTrackingMatchSummary(awbSet);
+    const reconciledSummary = await markOrdersReconciledByShipments(shipmentSummaries);
     const anomalySummary = await detectAndPersistCarrierAnomalies(shipmentSummaries);
     const result = {
         carrier: 'DHL',
@@ -1233,6 +1303,7 @@ async function processDhlRows(rows, sourceFileName) {
         skipped_rows_missing_required: skippedMissingRequired,
         charge_summary: chargeSummary,
         tracking_match: trackingMatch,
+        reconciled_orders: reconciledSummary,
         anomalies: anomalySummary,
     };
     console.log('[carrier-invoice] import summary:', JSON.stringify(result));

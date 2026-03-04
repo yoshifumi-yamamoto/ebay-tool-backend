@@ -32,6 +32,31 @@ exports.fetchPackingVerification = async (filters = {}) => {
   const needsFinalShippingFilter =
     normalizedFinalShippingStatus === 'confirmed' || normalizedFinalShippingStatus === 'unconfirmed';
 
+  let carrierMetaQuery = supabase
+    .from('orders')
+    .select('shipping_carrier')
+    .eq('user_id', user_id)
+    .eq('shipping_status', 'SHIPPED');
+
+  if (start_date) carrierMetaQuery = carrierMetaQuery.gte('order_date', start_date);
+  if (end_date) carrierMetaQuery = carrierMetaQuery.lte('order_date', end_date);
+  if (ebay_user_id) carrierMetaQuery = carrierMetaQuery.eq('ebay_user_id', ebay_user_id);
+  if (order_no) carrierMetaQuery = carrierMetaQuery.ilike('order_no', `%${order_no}%`);
+  if (tracking_number) carrierMetaQuery = carrierMetaQuery.ilike('shipping_tracking_number', `%${tracking_number}%`);
+  if (normalizedFinalShippingStatus === 'confirmed') {
+    carrierMetaQuery = carrierMetaQuery.not('final_shipping_cost', 'is', null);
+  } else if (normalizedFinalShippingStatus === 'unconfirmed') {
+    carrierMetaQuery = carrierMetaQuery.is('final_shipping_cost', null);
+  }
+
+  const { data: carrierMetaRows, error: carrierMetaError } = await carrierMetaQuery;
+  if (carrierMetaError) {
+    console.error('Failed to fetch carrier options:', carrierMetaError.message);
+  }
+  const carrierOptions = Array.from(
+    new Set((carrierMetaRows || []).map((row) => row?.shipping_carrier).filter(Boolean))
+  ).sort((a, b) => String(a).localeCompare(String(b)));
+
   let query = supabase
     .from('orders')
     .select(`
@@ -298,6 +323,9 @@ exports.fetchPackingVerification = async (filters = {}) => {
     return {
       data: mapped,
       total: count || 0,
+      meta: {
+        carriers: carrierOptions,
+      },
     };
   }
 
@@ -311,6 +339,9 @@ exports.fetchPackingVerification = async (filters = {}) => {
   return {
     data: filtered.slice(safeOffset, safeOffset + safeLimit),
     total: filtered.length,
+    meta: {
+      carriers: carrierOptions,
+    },
   };
 };
 

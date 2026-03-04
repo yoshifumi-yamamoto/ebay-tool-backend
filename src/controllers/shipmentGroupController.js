@@ -51,10 +51,52 @@ async function getShipmentGroup(req, res) {
     }
 }
 
+async function dissolveShipmentGroup(req, res) {
+    const groupId = req.params.id;
+    const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);
+    if (!groupId) {
+        return res.status(400).json({ error: 'group id is required' });
+    }
+    if (!userId) {
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+    try {
+        const result = await shipmentGroupService.dissolveShipmentGroup(groupId, userId);
+        return res.status(200).json(result);
+    } catch (error) {
+        console.error('Failed to dissolve shipment group:', error.message);
+        return res.status(500).json({ error: error.message || 'Failed to dissolve shipment group' });
+    }
+}
+
+async function removeOrderFromShipmentGroup(req, res) {
+    const groupId = req.params.id;
+    const orderNo = req.params.orderNo;
+    const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);
+    if (!groupId) {
+        return res.status(400).json({ error: 'group id is required' });
+    }
+    if (!orderNo) {
+        return res.status(400).json({ error: 'orderNo is required' });
+    }
+    if (!userId) {
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+    try {
+        const result = await shipmentGroupService.removeOrderFromShipmentGroup(groupId, userId, orderNo);
+        return res.status(200).json(result);
+    } catch (error) {
+        console.error('Failed to remove order from shipment group:', error.message);
+        return res.status(500).json({ error: error.message || 'Failed to remove order from shipment group' });
+    }
+}
+
 module.exports = {
     listShipmentGroups,
     createShipmentGroup,
     getShipmentGroup,
+    dissolveShipmentGroup,
+    removeOrderFromShipmentGroup,
     estimateRates: async (req, res) => {
         const groupId = req.params.id;
         const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);

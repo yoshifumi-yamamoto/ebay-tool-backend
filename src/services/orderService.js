@@ -829,7 +829,8 @@ async function markOrdersAsShipped(orderIds) {
     const { data, error } = await supabase
         .from('orders')
         .update({
-            shipping_status: 'SHIPPED'
+            shipping_status: 'SHIPPED',
+            shipment_recorded_at: new Date().toISOString()
         })
         .in('id', orderIds)
         .select('id, order_no, shipping_status');
@@ -1119,6 +1120,10 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         shipcoDataApplied
             ? new Date().toISOString()
             : existingShipcoSyncedAt || null;
+    const existingShipmentRecordedAt = existingData?.shipment_recorded_at || null;
+    const shipmentRecordedAt =
+        existingShipmentRecordedAt ||
+        (shipcoDataApplied ? shipcoSyncedAt : null);
 
     console.info(
         `[orderService] Order ${order.orderId} earnings summary: earnings=${order.paymentSummary.totalDueSeller.value} ${earningsCurrency || 'USD'}, earnings_after_pl_fee=${earningsAfterPlFee} ${earningsAfterPlFeeCurrency || earningsCurrency || 'USD'}`
@@ -1158,6 +1163,7 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         earnings_currency: earningsCurrency,
         earnings_after_pl_fee_currency: earningsAfterPlFeeCurrency,
         shipco_synced_at: shipcoSyncedAt,
+        shipment_recorded_at: shipmentRecordedAt,
         researcher: existingData ? existingData.researcher : researcher
     };
 

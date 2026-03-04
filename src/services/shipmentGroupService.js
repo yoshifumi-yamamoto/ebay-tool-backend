@@ -50,8 +50,10 @@ async function estimateRates(groupId, userId, payload = {}) {
     if (!from_address) {
         throw new Error('from_address is required');
     }
-    const { orders } = await fetchGroupOrders(groupId, userId);
-    const primaryOrder = orders[0];
+    const { group, orders } = await fetchGroupOrders(groupId, userId);
+    const primaryOrder =
+        orders.find((order) => order?.order_no === group?.primary_order_no) ||
+        orders[0];
     const toAddress = to_address || buildShipcoAddress(primaryOrder?.ship_to || {});
     const resolvedParcels = Array.isArray(parcels) && parcels.length > 0
         ? parcels
@@ -101,7 +103,9 @@ async function createShipmentForGroup(groupId, userId, payload = {}) {
         throw new Error('setup.carrier and setup.service are required');
     }
     const { group, orders, orderNos } = await fetchGroupOrders(groupId, userId);
-    const primaryOrder = orders[0];
+    const primaryOrder =
+        orders.find((order) => order?.order_no === group?.primary_order_no) ||
+        orders[0];
     const toAddress = to_address || buildShipcoAddress(primaryOrder?.ship_to || {});
     const resolvedParcels = Array.isArray(parcels) && parcels.length > 0
         ? parcels
@@ -257,10 +261,98 @@ async function createShipmentGroup(userId, orderNos, primaryOrderNo) {
     return { id: groupId, order_nos: orderNos, primary_order_no: primary };
 }
 
+async function dissolveShipmentGroup(groupId, userId) {
+    const { group, orderNos } = await fetchGroupOrders(groupId, userId);
+    if (group.status === 'shipped') {
+        throw new Error('Shipped shipment group cannot be modified');
+    }
+    const { error: deleteLinksError } = await supabase
+        .from('shipment_group_orders')
+        .delete()
+        .eq('group_id', groupId);
+    if (deleteLinksError) {
+        throw new Error(`Failed to delete shipment group orders: ${deleteLinksError.message}`);
+    }
+    const { error: deleteGroupError } = await supabase
+        .from('shipment_groups')
+        .delete()
+        .eq('id', groupId)
+        .eq('user_id', userId);
+    if (deleteGroupError) {
+        throw new Error(`Failed to delete shipment group: ${deleteGroupError.message}`);
+    }
+    return { id: groupId, released_order_nos: orderNos };
+}
+
+async function removeOrderFromShipmentGroup(groupId, userId, orderNo) {
+    const normalizedOrderNo = normalizeString(orderNo);
+    if (!normalizedOrderNo) {
+        throw new Error('orderNo is required');
+    }
+    const { group, orderNos } = await fetchGroupOrders(groupId, userId);
+    if (group.status === 'shipped') {
+        throw new Error('Shipped shipment group cannot be modified');
+    }
+    if (!orderNos.includes(normalizedOrderNo)) {
+        throw new Error('Order is not part of this shipment group');
+    }
+
+    const remainingOrderNos = orderNos.filter((value) => value !== normalizedOrderNo);
+    const { error: deleteLinkError } = await supabase
+        .from('shipment_group_orders')
+        .delete()
+        .eq('group_id', groupId)
+        .eq('order_no', normalizedOrderNo);
+    if (deleteLinkError) {
+        throw new Error(`Failed to remove order from shipment group: ${deleteLinkError.message}`);
+    }
+
+    if (remainingOrderNos.length < 2) {
+        const { error: deleteGroupError } = await supabase
+            .from('shipment_groups')
+            .delete()
+            .eq('id', groupId)
+            .eq('user_id', userId);
+        if (deleteGroupError) {
+            throw new Error(`Failed to delete shipment group: ${deleteGroupError.message}`);
+        }
+        return {
+            id: groupId,
+            deleted_group: true,
+            removed_order_no: normalizedOrderNo,
+            remaining_order_nos: remainingOrderNos,
+        };
+    }
+
+    const nextPrimaryOrderNo =
+        group.primary_order_no === normalizedOrderNo ? remainingOrderNos[0] : group.primary_order_no;
+    const { error: updateGroupError } = await supabase
+        .from('shipment_groups')
+        .update({
+            primary_order_no: nextPrimaryOrderNo,
+            updated_at: new Date().toISOString(),
+        })
+        .eq('id', groupId)
+        .eq('user_id', userId);
+    if (updateGroupError) {
+        throw new Error(`Failed to update shipment group: ${updateGroupError.message}`);
+    }
+
+    return {
+        id: groupId,
+        deleted_group: false,
+        removed_order_no: normalizedOrderNo,
+        remaining_order_nos: remainingOrderNos,
+        primary_order_no: nextPrimaryOrderNo,
+    };
+}
+
 module.exports = {
     listShipmentGroups,
     fetchShipmentGroupDetails,
     createShipmentGroup,
     estimateRates,
     createShipmentForGroup,
+    dissolveShipmentGroup,
+    removeOrderFromShipmentGroup,
 };
