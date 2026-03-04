@@ -119,6 +119,38 @@ exports.uploadTrackingInfo = async (req, res) => {
     }
 };
 
+exports.addOrderLineItemToInventoryTarget = async (req, res) => {
+    const { orderNo } = req.params;
+    const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);
+    const { line_item_id, location_code, status_code, quantity, note } = req.body || {};
+
+    if (!orderNo) {
+        return res.status(400).json({ error: 'orderNo is required' });
+    }
+    if (!userId) {
+        return res.status(400).json({ error: 'user_id is required' });
+    }
+    if (!line_item_id) {
+        return res.status(400).json({ error: 'line_item_id is required' });
+    }
+
+    try {
+        const result = await orderService.addOrderLineItemToInventoryTarget({
+            userId,
+            orderNo,
+            lineItemId: line_item_id,
+            locationCode: location_code || 'domestic_pool',
+            statusCode: status_code || 'returned',
+            quantity,
+            note,
+        });
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('Failed to add line item to inventory target:', error.message);
+        res.status(400).json({ error: error.message });
+    }
+};
+
 exports.estimateShipcoRates = async (req, res) => {
     const orderNo = req.params.orderNo;
     const userId = Number(req.body?.user_id || req.query?.user_id || req.query?.userId);

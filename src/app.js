@@ -41,6 +41,7 @@ const employeeRoutes = require('./routes/employeeRoutes');
 const nameMapRoutes = require('./routes/nameMapRoutes');
 const fixedCostRoutes = require('./routes/fixedCostRoutes');
 const priorityQuadrantRoutes = require('./routes/priorityQuadrantRoutes');
+const inventoryCountRoutes = require('./routes/inventoryCountRoutes');
 
 // スケジューラのインポート
 const { scheduleInventoryUpdates } = require('./scheduler');
@@ -143,6 +144,7 @@ app.use('/api/employees', employeeRoutes);
 app.use('/api/name-maps', nameMapRoutes);
 app.use('/api/fixed-costs', fixedCostRoutes);
 app.use('/api/priority', priorityQuadrantRoutes);
+app.use('/api/inventory-counts', inventoryCountRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {

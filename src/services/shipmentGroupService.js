@@ -157,18 +157,19 @@ async function createShipmentForGroup(groupId, userId, payload = {}) {
             orderNo,
             trackingNumber,
             carrierCode,
+            statusOverride: 'READY',
         });
     }
 
     const { error: updateError } = await supabase
         .from('shipment_groups')
         .update({
-            status: 'shipped',
+            status: 'ready',
             tracking_number: trackingNumber,
             label_url: labelUrl,
             shipment_id: shipment?.id || null,
             shipping_carrier: carrierCode,
-            shipped_at: new Date().toISOString(),
+            shipped_at: null,
         })
         .eq('id', group.id);
     if (updateError) {

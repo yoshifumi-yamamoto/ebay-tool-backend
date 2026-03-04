@@ -1825,6 +1825,92 @@ async function uploadTrackingInfoToEbayProxy(params) {
     return attachFinancialsToOrder(normalizedOrder, exchangeRates);
 }
 
+async function addOrderLineItemToInventoryTarget({
+    userId,
+    orderNo,
+    lineItemId,
+    locationCode = 'domestic_pool',
+    statusCode = 'returned',
+    quantity,
+    note,
+}) {
+    const { data: order, error: orderError } = await supabase
+        .from('orders')
+        .select('id, order_no, user_id, cost_price, order_line_items(*)')
+        .eq('order_no', orderNo)
+        .eq('user_id', userId)
+        .single();
+
+    if (orderError || !order) {
+        throw new Error(`Order not found: ${orderError?.message || orderNo}`);
+    }
+
+    const items = Array.isArray(order.order_line_items) ? order.order_line_items : [];
+    const targetLine = items.find((item) => {
+        const candidates = [item?.id, item?.line_item_id, item?.lineItemId, item?.legacy_item_id, item?.legacyItemId]
+            .filter(Boolean)
+            .map(String);
+        return candidates.includes(String(lineItemId));
+    });
+    if (!targetLine) {
+        throw new Error('Line item not found');
+    }
+
+    const baseSku =
+        targetLine.sku ||
+        targetLine.legacy_item_id ||
+        targetLine.legacyItemId ||
+        targetLine.line_item_id ||
+        targetLine.lineItemId ||
+        null;
+    if (!baseSku) {
+        throw new Error('SKU could not be resolved from line item');
+    }
+
+    const defaultQty = Number(targetLine.quantity);
+    const resolvedQty = Number.isFinite(Number(quantity)) && Number(quantity) > 0
+        ? Math.trunc(Number(quantity))
+        : Number.isFinite(defaultQty) && defaultQty > 0
+            ? Math.trunc(defaultQty)
+            : 1;
+
+    const costPrice = Number(targetLine.cost_price);
+    const unitCostYen = Number.isFinite(costPrice) ? Math.trunc(costPrice) : null;
+    const procurementUrl = targetLine.procurement_url || targetLine.stocking_url || null;
+    const procurementSource = targetLine.procurement_site_name || targetLine.procurementSiteName || null;
+    const researcher = targetLine.researcher || order.researcher || null;
+    const suffix = `${order.order_no}/${lineItemId}`;
+    const rows = Array.from({ length: resolvedQty }, (_, idx) => ({
+        user_id: userId,
+        sku: String(baseSku),
+        item_id: null,
+        location_code: locationCode,
+        status_code: statusCode,
+        cost_yen: unitCostYen,
+        procurement_url: procurementUrl,
+        procurement_source: procurementSource,
+        researcher,
+        note: note || `from_order:${suffix}#${idx + 1}`,
+        updated_at: new Date().toISOString(),
+    }));
+
+    const { data, error } = await supabase
+        .from('inventory_units')
+        .insert(rows)
+        .select('id, sku, location_code, status_code, cost_yen, procurement_url, procurement_source, researcher, note');
+    if (error) {
+        throw new Error(`Failed to insert inventory units: ${error.message}`);
+    }
+
+    return {
+        order_no: orderNo,
+        line_item_id: lineItemId,
+        sku: String(baseSku),
+        inserted_count: rows.length,
+        units: data || [],
+    };
+}
+
 /**
  * 先週の月曜日から日曜日の範囲を計算する関数
  * @returns {Object} - 先週の開始日と終了日を含むオブジェクト
@@ -1918,5 +2004,6 @@ module.exports = {
     normalizeOrderLineItem,
     attachNormalizedLineItemsToOrder,
     normalizeProcurementStatusValue,
-    uploadTrackingInfoToEbay: uploadTrackingInfoToEbayProxy
+    uploadTrackingInfoToEbay: uploadTrackingInfoToEbayProxy,
+    addOrderLineItemToInventoryTarget,
 };

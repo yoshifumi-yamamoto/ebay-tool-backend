@@ -18,6 +18,7 @@ router.put('/line-items/:lineItemId/procurement-tracking', orderController.updat
 router.post('/:orderNo/tracking', orderController.uploadTrackingInfo);
 router.post('/:orderNo/shipco/rates', orderController.estimateShipcoRates);
 router.post('/:orderNo/shipco/label', orderController.createShipcoShipment);
+router.post('/:orderNo/inventory-target', orderController.addOrderLineItemToInventoryTarget);
 
 // 発送ステータスを一括でSHIPPEDに更新
 router.put('/shipping-status/bulk', orderController.markOrdersAsShipped);
