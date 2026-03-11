@@ -5,7 +5,9 @@ const {
     updateShippingCostsFromCSV,
     updateCarrierInvoicesFromCSV,
     fetchCarrierInvoiceAnomalies,
+    updateCarrierInvoiceAnomalyResolution,
     fetchCarrierInvoiceChargeDetails,
+    fetchUnknownCarrierChargeEvents,
 } = require('../services/csvService');
 const { Readable } = require('stream');
 
@@ -193,6 +195,44 @@ const getCarrierInvoiceChargeDetails = async (req, res) => {
     }
 };
 
+const getUnknownCarrierChargeEvents = async (req, res) => {
+    try {
+        const result = await fetchUnknownCarrierChargeEvents({
+            limit: req.query.limit,
+            page: req.query.page,
+            carrier: req.query.carrier,
+            tracking_number: req.query.tracking_number,
+            label: req.query.label,
+            status: req.query.status,
+            from_date: req.query.from_date,
+            to_date: req.query.to_date,
+        });
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('Error fetching unknown carrier charge events:', error.message);
+        res.status(500).json({ error: 'Error fetching unknown carrier charge events' });
+    }
+};
+
+const patchCarrierInvoiceAnomalyResolution = async (req, res) => {
+    try {
+        const id = req.params.id;
+        const result = await updateCarrierInvoiceAnomalyResolution(id, {
+            resolved: req.body?.resolved,
+            resolved_reason: req.body?.resolved_reason,
+            resolved_by: req.body?.resolved_by,
+            resolved_note: req.body?.resolved_note,
+        });
+        res.status(200).json(result);
+    } catch (error) {
+        if (error.message === 'id is required') {
+            return res.status(400).json({ error: error.message });
+        }
+        console.error('Error updating anomaly resolution:', error.message);
+        res.status(500).json({ error: 'Error updating anomaly resolution' });
+    }
+};
+
 module.exports = {
     processCSVUpload,
     processActiveListingsCSVUpload,
@@ -200,4 +240,6 @@ module.exports = {
     processCarrierInvoicesCSVUpload,
     getCarrierInvoiceAnomalies,
     getCarrierInvoiceChargeDetails,
+    getUnknownCarrierChargeEvents,
+    patchCarrierInvoiceAnomalyResolution,
 };

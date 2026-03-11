@@ -4,9 +4,19 @@ const supabase = require('../supabaseClient');
 
 const batchSize = 100; // バッチサイズを設定
 const concurrencyLimit = 5; // 並行処理のリミットを設定
-const DEFAULT_CUSTOMS_RATIO_THRESHOLD = Number(process.env.CARRIER_ANOMALY_CUSTOMS_RATIO_THRESHOLD) || 0.5;
-const DEFAULT_FEE_RATIO_THRESHOLD = Number(process.env.CARRIER_ANOMALY_FEE_RATIO_THRESHOLD) || 0.35;
+const DEFAULT_CUSTOMS_RATIO_THRESHOLD = Number(process.env.CARRIER_ANOMALY_CUSTOMS_RATIO_THRESHOLD) || 0.2;
+const DEFAULT_FEE_RATIO_THRESHOLD = Number(process.env.CARRIER_ANOMALY_FEE_RATIO_THRESHOLD) || 0.6;
+const DEFAULT_FEE_RATIO_MIN_FEE_AMOUNT = Number(process.env.CARRIER_ANOMALY_FEE_RATIO_MIN_FEE_AMOUNT) || 2000;
+const DEFAULT_FEE_RATIO_MIN_SHIPPING_AMOUNT = Number(process.env.CARRIER_ANOMALY_FEE_RATIO_MIN_SHIPPING_AMOUNT) || 3000;
 const DEFAULT_UNKNOWN_OTHER_MIN_ABS_AMOUNT = Number(process.env.CARRIER_ANOMALY_UNKNOWN_OTHER_MIN_ABS_AMOUNT) || 300;
+const ENV_EXCHANGE_RATES = {
+    USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
+    EUR: Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null,
+    CAD: Number(process.env.EXCHANGE_RATE_CAD_TO_JPY) || null,
+    GBP: Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null,
+    AUD: Number(process.env.EXCHANGE_RATE_AUD_TO_JPY) || null,
+    JPY: 1,
+};
 const DEFAULT_OTHER_LABEL_ALLOWLIST = (
     process.env.CARRIER_ANOMALY_OTHER_LABEL_ALLOWLIST ||
     '割引額,discount,rebate'
@@ -510,6 +520,10 @@ function classifyDhlCharge(label, taxCode) {
     }
     const lower = String(label || '').toLowerCase();
     const taxLower = String(taxCode || '').toLowerCase();
+    // DHL shipping surcharges that should be treated as shipping, not fee/other.
+    if (lower.includes('oversize piece') || lower.includes('fuel surcharge')) {
+        return 'shipping';
+    }
     if (
         taxLower.includes('vat') ||
         taxLower.includes('duty') ||
@@ -544,6 +558,60 @@ function getDhlTotalAmountRaw(row) {
         row['Total amount'] ??
         null
     );
+}
+
+function normalizeChargeLabel(label) {
+    return String(label || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+}
+
+async function loadChargeLabelCatalogMap(carrier) {
+    const result = {};
+    const normalizedCarrier = String(carrier || '').toUpperCase();
+    if (!normalizedCarrier) return result;
+    const { data, error } = await supabase
+        .from('carrier_charge_label_catalog')
+        .select('id, carrier, normalized_label, default_group, is_active')
+        .eq('carrier', normalizedCarrier)
+        .eq('is_active', true);
+    if (error) {
+        console.warn('[carrier-invoice] failed to load charge label catalog:', error.message);
+        return result;
+    }
+    (data || []).forEach((row) => {
+        if (!row?.normalized_label) return;
+        result[row.normalized_label] = row;
+    });
+    return result;
+}
+
+async function upsertUnknownChargeEvents(events) {
+    if (!Array.isArray(events) || events.length === 0) return;
+    const nowIso = new Date().toISOString();
+    const payload = events.map((row) => ({
+        shipment_id: row.shipment_id,
+        invoice_id: row.invoice_id,
+        carrier: row.carrier,
+        invoice_number: row.invoice_number,
+        awb_number: row.awb_number,
+        charge_name_raw: row.charge_name_raw,
+        normalized_label: row.normalized_label,
+        amount: row.amount,
+        header_occurrence_no: row.header_occurrence_no ?? null,
+        line_no: row.line_no ?? null,
+        resolved: false,
+        resolved_at: null,
+        last_detected_at: nowIso,
+        updated_at: nowIso,
+    }));
+    const { error } = await supabase
+        .from('carrier_unknown_charge_events')
+        .upsert(payload, { onConflict: 'shipment_id,normalized_label,line_no' });
+    if (error) {
+        console.warn('[carrier-invoice] failed to upsert unknown charge events:', error.message);
+    }
 }
 
 async function upsertCarrierInvoice(payload) {
@@ -725,26 +793,65 @@ async function loadOrderInfoByTrackingNumbers(awbNumbers) {
     if (!Array.isArray(awbNumbers) || awbNumbers.length === 0) {
         return result;
     }
+    const orderRows = [];
     const chunkSize = 500;
     for (let i = 0; i < awbNumbers.length; i += chunkSize) {
         const chunk = awbNumbers.slice(i, i + chunkSize);
         const { data, error } = await supabase
             .from('orders')
-            .select('id, order_no, ebay_user_id, user_id, shipping_tracking_number, buyer_country_code')
+            .select('id, order_no, ebay_user_id, user_id, shipping_tracking_number, buyer_country_code, total_amount, total_amount_currency')
             .in('shipping_tracking_number', chunk);
         if (error) {
             console.error('[carrier-invoice] failed to load orders by tracking:', error.message);
             continue;
         }
-        (data || []).forEach((row) => {
-            if (!row?.shipping_tracking_number) {
-                return;
-            }
-            if (!result[row.shipping_tracking_number]) {
-                result[row.shipping_tracking_number] = row;
-            }
-        });
+        orderRows.push(...(data || []));
     }
+
+    const userIds = Array.from(new Set(orderRows.map((row) => row?.user_id).filter(Boolean)));
+    const userRates = {};
+    if (userIds.length > 0) {
+        const { data: users, error: usersError } = await supabase
+            .from('users')
+            .select('id, usd_rate, eur_rate, cad_rate, gbp_rate, aud_rate')
+            .in('id', userIds);
+        if (usersError) {
+            console.warn('[carrier-invoice] failed to load users for exchange rates:', usersError.message);
+        } else {
+            (users || []).forEach((user) => {
+                userRates[user.id] = {
+                    ...ENV_EXCHANGE_RATES,
+                    USD: Number(user.usd_rate) || ENV_EXCHANGE_RATES.USD,
+                    EUR: Number(user.eur_rate) || ENV_EXCHANGE_RATES.EUR,
+                    CAD: Number(user.cad_rate) || ENV_EXCHANGE_RATES.CAD,
+                    GBP: Number(user.gbp_rate) || ENV_EXCHANGE_RATES.GBP,
+                    AUD: Number(user.aud_rate) || ENV_EXCHANGE_RATES.AUD,
+                    JPY: 1,
+                };
+            });
+        }
+    }
+
+    orderRows.forEach((row) => {
+        if (!row?.shipping_tracking_number) {
+            return;
+        }
+        const amount = Number(row.total_amount);
+        const currency = String(row.total_amount_currency || '').toUpperCase();
+        const rates = userRates[row.user_id] || ENV_EXCHANGE_RATES;
+        const rate = rates[currency];
+        const orderTotalJpy =
+            Number.isFinite(amount) && amount > 0 && Number.isFinite(rate) && rate > 0
+                ? amount * rate
+                : null;
+        const normalized = {
+            ...row,
+            order_total_jpy: orderTotalJpy,
+        };
+        if (!result[row.shipping_tracking_number]) {
+            result[row.shipping_tracking_number] = normalized;
+        }
+    });
     return result;
 }
 
@@ -819,11 +926,11 @@ function buildShipmentAnomalies(shipment, orderInfo) {
     const anomalies = [];
     const customsRatioThreshold = DEFAULT_CUSTOMS_RATIO_THRESHOLD;
     const feeRatioThreshold = DEFAULT_FEE_RATIO_THRESHOLD;
+    const minFeeAmountForFeeRatio = DEFAULT_FEE_RATIO_MIN_FEE_AMOUNT;
+    const minShippingAmountForFeeRatio = DEFAULT_FEE_RATIO_MIN_SHIPPING_AMOUNT;
     const shippingAmount = Number(shipment?.charge_summary?.shipping_amount) || 0;
     const customsAmount = Number(shipment?.charge_summary?.customs_amount) || 0;
     const feeAmount = Number(shipment?.charge_summary?.fee_amount) || 0;
-    const netShippingExcludingCustoms =
-        Number(shipment?.charge_summary?.total_amount) - customsAmount;
     const buyerCountryCode = orderInfo?.buyer_country_code || null;
 
     if (!orderInfo) {
@@ -842,20 +949,24 @@ function buildShipmentAnomalies(shipment, orderInfo) {
         });
     }
 
-    if (shippingAmount > 0 && feeAmount / shippingAmount > feeRatioThreshold) {
+    if (
+        shippingAmount >= minShippingAmountForFeeRatio &&
+        feeAmount >= minFeeAmountForFeeRatio &&
+        feeAmount / shippingAmount > feeRatioThreshold
+    ) {
         anomalies.push({
             anomaly_code: 'HIGH_FEE_RATIO',
-            severity: 'medium',
-            message: `Fee ratio is high (${(feeAmount / shippingAmount * 100).toFixed(1)}%)`,
+            severity: 'warning',
+            message: `Fee ratio is high (${(feeAmount / shippingAmount * 100).toFixed(1)}%; fee=${feeAmount}, shipping=${shippingAmount})`,
         });
     }
 
-    const customsRatioBase = shippingAmount > 0 ? shippingAmount : netShippingExcludingCustoms;
-    if (shippingAmount > 0 && customsAmount > 0 && customsRatioBase > 0 && customsAmount / customsRatioBase > customsRatioThreshold) {
+    const orderTotalJpy = Number(orderInfo?.order_total_jpy || 0);
+    if (customsAmount > 0 && orderTotalJpy > 0 && customsAmount / orderTotalJpy > customsRatioThreshold) {
         anomalies.push({
             anomaly_code: 'HIGH_CUSTOMS_RATIO',
             severity: 'medium',
-            message: `Customs ratio is high (${(customsAmount / customsRatioBase * 100).toFixed(1)}%)`,
+            message: `Customs ratio is high (${(customsAmount / orderTotalJpy * 100).toFixed(1)}% of order amount)`,
         });
     }
 
@@ -887,7 +998,31 @@ async function upsertCarrierInvoiceAnomalies(anomalies) {
         return { ok: true, error: null };
     }
     const nowIso = new Date().toISOString();
-    const payload = anomalies.map((row) => ({
+    const shipmentIds = Array.from(new Set(anomalies.map((row) => row.shipment_id).filter(Boolean)));
+    const anomalyCodes = Array.from(new Set(anomalies.map((row) => row.anomaly_code).filter(Boolean)));
+
+    let existingRows = [];
+    if (shipmentIds.length > 0 && anomalyCodes.length > 0) {
+        const { data, error } = await supabase
+            .from('carrier_invoice_anomalies')
+            .select('shipment_id, anomaly_code, resolved, resolved_at, resolved_reason, resolved_by, resolved_note')
+            .in('shipment_id', shipmentIds)
+            .in('anomaly_code', anomalyCodes);
+        if (error) {
+            console.error('[carrier-invoice] failed to load existing anomalies before upsert:', error.message);
+            return { ok: false, error: error.message };
+        }
+        existingRows = data || [];
+    }
+
+    const existingByKey = new Map(
+        existingRows.map((row) => [`${row.shipment_id}::${row.anomaly_code}`, row])
+    );
+
+    const payload = anomalies.map((row) => {
+        const existing = existingByKey.get(`${row.shipment_id}::${row.anomaly_code}`) || null;
+        const keepResolved = !!existing?.resolved;
+        return {
         shipment_id: row.shipment_id,
         invoice_id: row.invoice_id,
         carrier: row.carrier,
@@ -908,9 +1043,13 @@ async function upsertCarrierInvoiceAnomalies(anomalies) {
         total_amount: row.total_amount,
         details: row.details,
         last_detected_at: nowIso,
-        resolved: false,
-        resolved_at: null,
-    }));
+        // Preserve manual/system resolution once checked.
+        resolved: keepResolved,
+        resolved_at: keepResolved ? existing.resolved_at || nowIso : null,
+        resolved_reason: keepResolved ? existing.resolved_reason || null : null,
+        resolved_by: keepResolved ? existing.resolved_by || null : null,
+        resolved_note: keepResolved ? existing.resolved_note || null : null,
+    };});
     const { error } = await supabase
         .from('carrier_invoice_anomalies')
         .upsert(payload, { onConflict: 'shipment_id,anomaly_code' });
@@ -1017,6 +1156,8 @@ async function processFedexRows(rows, sourceFileName, options = {}) {
     let totalDetectedChargePairs = 0;
     let mismatchPairRows = 0;
     let warningCount = 0;
+    const unknownChargeEvents = [];
+    const fedexCatalog = await loadChargeLabelCatalogMap('FEDEX');
 
     for (const row of rows) {
         const invoiceNumber = row['FedEx請求書番号'];
@@ -1128,7 +1269,12 @@ async function processFedexRows(rows, sourceFileName, options = {}) {
             if (amount === 0) {
                 continue;
             }
-            const chargeGroup = classifyFedexCharge(String(label));
+            const normalizedLabel = normalizeChargeLabel(String(label));
+            const catalogEntry = fedexCatalog[normalizedLabel] || null;
+            const chargeGroup =
+                catalogEntry?.default_group && catalogEntry.default_group !== 'ignore'
+                    ? catalogEntry.default_group
+                    : classifyFedexCharge(String(label));
             charges.push({
                 shipment_id: shipmentId,
                 charge_group: chargeGroup,
@@ -1139,6 +1285,26 @@ async function processFedexRows(rows, sourceFileName, options = {}) {
                 line_no: occurrenceNo,
             });
             addChargeToSummary(chargeSummary, chargeGroup, amount);
+            if (!catalogEntry && chargeGroup === 'other') {
+                const lowerLabel = normalizedLabel;
+                if (
+                    Math.abs(amount) >= DEFAULT_UNKNOWN_OTHER_MIN_ABS_AMOUNT &&
+                    !DEFAULT_OTHER_LABEL_ALLOWLIST.some((allowed) => lowerLabel.includes(allowed))
+                ) {
+                    unknownChargeEvents.push({
+                        shipment_id: shipmentId,
+                        invoice_id: invoiceId,
+                        carrier: 'FEDEX',
+                        invoice_number: invoiceNumber,
+                        awb_number: awb,
+                        charge_name_raw: String(label),
+                        normalized_label: normalizedLabel,
+                        amount,
+                        header_occurrence_no: occurrenceNo,
+                        line_no: occurrenceNo,
+                    });
+                }
+            }
         }
         await replaceCarrierCharges(shipmentId, charges);
         shipmentSummaries.push({
@@ -1157,6 +1323,7 @@ async function processFedexRows(rows, sourceFileName, options = {}) {
         processed += 1;
     }
     await insertCarrierInvoiceImportLogs(importLogs);
+    await upsertUnknownChargeEvents(unknownChargeEvents);
     const trackingMatch = await buildTrackingMatchSummary(awbSet);
     const reconciledSummary = await markOrdersReconciledByShipments(shipmentSummaries);
     const anomalySummary = await detectAndPersistCarrierAnomalies(shipmentSummaries);
@@ -1190,6 +1357,8 @@ async function processDhlRows(rows, sourceFileName) {
     const awbSet = new Set();
     const chargeSummary = createChargeSummary();
     const shipmentSummaries = [];
+    const unknownChargeEvents = [];
+    const dhlCatalog = await loadChargeLabelCatalogMap('DHL');
     rows.forEach((row) => {
         const invoiceNumber = row['Invoice Number'];
         const awb = row['Shipment Number'];
@@ -1242,7 +1411,12 @@ async function processDhlRows(rows, sourceFileName) {
             if (parsed === null || parsed === 0) {
                 return;
             }
-            const chargeGroup = classifyDhlCharge(name, taxCode);
+            const normalizedLabel = normalizeChargeLabel(name);
+            const catalogEntry = dhlCatalog[normalizedLabel] || null;
+            const chargeGroup =
+                catalogEntry?.default_group && catalogEntry.default_group !== 'ignore'
+                    ? catalogEntry.default_group
+                    : classifyDhlCharge(name, taxCode);
             charges.push({
                 shipment_id: shipmentId,
                 charge_group: chargeGroup,
@@ -1252,6 +1426,26 @@ async function processDhlRows(rows, sourceFileName) {
                 line_no: lineNo,
             });
             addChargeToSummary(chargeSummary, chargeGroup, parsed);
+            if (!catalogEntry && chargeGroup === 'other') {
+                const lowerLabel = normalizedLabel;
+                if (
+                    Math.abs(parsed) >= DEFAULT_UNKNOWN_OTHER_MIN_ABS_AMOUNT &&
+                    !DEFAULT_OTHER_LABEL_ALLOWLIST.some((allowed) => lowerLabel.includes(allowed))
+                ) {
+                    unknownChargeEvents.push({
+                        shipment_id: shipmentId,
+                        invoice_id: invoiceId,
+                        carrier: 'DHL',
+                        invoice_number: invoiceNumber,
+                        awb_number: awb,
+                        charge_name_raw: name,
+                        normalized_label: normalizedLabel,
+                        amount: parsed,
+                        header_occurrence_no: null,
+                        line_no: lineNo,
+                    });
+                }
+            }
             lineNo += 1;
         };
 
@@ -1293,6 +1487,7 @@ async function processDhlRows(rows, sourceFileName) {
         processed += 1;
     }
     const trackingMatch = await buildTrackingMatchSummary(awbSet);
+    await upsertUnknownChargeEvents(unknownChargeEvents);
     const reconciledSummary = await markOrdersReconciledByShipments(shipmentSummaries);
     const anomalySummary = await detectAndPersistCarrierAnomalies(shipmentSummaries);
     const result = {
@@ -1391,6 +1586,38 @@ async function fetchCarrierInvoiceAnomalies(filters = {}) {
     };
 }
 
+async function updateCarrierInvoiceAnomalyResolution(id, payload = {}) {
+    if (!id) {
+        throw new Error('id is required');
+    }
+    const resolved = payload.resolved === true;
+    const updatePayload = {
+        resolved,
+        resolved_at: resolved ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+    };
+    if (payload.resolved_reason !== undefined) {
+        updatePayload.resolved_reason = payload.resolved_reason || null;
+    }
+    if (payload.resolved_by !== undefined) {
+        updatePayload.resolved_by = payload.resolved_by || null;
+    }
+    if (payload.resolved_note !== undefined) {
+        updatePayload.resolved_note = payload.resolved_note || null;
+    }
+
+    const { data, error } = await supabase
+        .from('carrier_invoice_anomalies')
+        .update(updatePayload)
+        .eq('id', id)
+        .select('*')
+        .single();
+    if (error) {
+        throw new Error(`failed to update anomaly resolution: ${error.message}`);
+    }
+    return data;
+}
+
 async function fetchCarrierInvoiceChargeDetails(filters = {}) {
     const carrier = filters.carrier ? String(filters.carrier).trim().toUpperCase() : '';
     const awbNumber = filters.awb_number ? String(filters.awb_number).trim() : '';
@@ -1485,6 +1712,34 @@ async function fetchCarrierInvoiceChargeDetails(filters = {}) {
     };
 }
 
+async function fetchUnknownCarrierChargeEvents(filters = {}) {
+    const limit = Number.isFinite(Number(filters.limit)) ? Math.min(Number(filters.limit), 200) : 50;
+    const page = Number.isFinite(Number(filters.page)) ? Math.max(Number(filters.page), 0) : 0;
+    const offset = page * limit;
+    let query = supabase
+        .from('carrier_unknown_charge_events')
+        .select('*', { count: 'exact' })
+        .order('last_detected_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+
+    if (filters.carrier) query = query.eq('carrier', filters.carrier);
+    if (filters.tracking_number) query = query.ilike('awb_number', `%${filters.tracking_number}%`);
+    if (filters.label) query = query.ilike('charge_name_raw', `%${filters.label}%`);
+    if (filters.status === 'open') query = query.eq('resolved', false);
+    if (filters.status === 'resolved') query = query.eq('resolved', true);
+    if (filters.from_date) query = query.gte('last_detected_at', `${filters.from_date}T00:00:00`);
+    if (filters.to_date) query = query.lte('last_detected_at', `${filters.to_date}T23:59:59`);
+
+    const { data, error, count } = await query;
+    if (error) {
+        throw new Error(`failed to fetch unknown carrier charge events: ${error.message}`);
+    }
+    return {
+        rows: data || [],
+        total: count || 0,
+    };
+}
+
 module.exports = {
     updateCategoriesFromCSV,
     updateTrafficFromCSV,
@@ -1492,5 +1747,7 @@ module.exports = {
     updateShippingCostsFromCSV,
     updateCarrierInvoicesFromCSV,
     fetchCarrierInvoiceAnomalies,
+    updateCarrierInvoiceAnomalyResolution,
     fetchCarrierInvoiceChargeDetails,
+    fetchUnknownCarrierChargeEvents,
 };

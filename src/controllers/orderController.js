@@ -239,6 +239,28 @@ exports.getOrdersByUserId = async (req, res) => {
     }
 };
 
+exports.getShippedOrdersByUserId = async (req, res) => {
+    const userId = req.query.userId;
+    if (!userId) {
+        return res.status(400).json({ error: 'User ID is required' });
+    }
+    try {
+        const orders = await orderService.fetchShippedOrders(userId);
+        res.json(orders);
+    } catch (error) {
+        await logSystemError({
+            error_code: 'ORDER_SHIPPED_FETCH_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: true,
+            user_id: userId,
+        });
+        res.status(500).json({ error: error.message });
+    }
+};
+
 // 注文番号で単一注文を取得
 exports.getOrderByOrderNo = async (req, res) => {
     const userId = req.query.userId;

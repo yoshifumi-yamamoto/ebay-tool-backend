@@ -157,23 +157,43 @@ async function fetchOrdersFromEbay(refreshToken) {
         };
         const now = new Date();
         const lookbackDays = Number.parseInt(process.env.EBAY_ORDER_LOOKBACK_DAYS || '120', 10);
+        const pageLimit = Math.min(
+            Number.parseInt(process.env.EBAY_ORDER_FETCH_LIMIT || '200', 10) || 200,
+            200
+        );
+        const maxPages = Number.parseInt(process.env.EBAY_ORDER_FETCH_MAX_PAGES || '10', 10) || 10;
         const fromDate = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
         const creationDateFilter = `creationdate:[${fromDate.toISOString()}..${now.toISOString()}]`;
 
-        const fetchWithFilter = async (filter) => {
+        const fetchWithFilter = async (filter, limit, offset) => {
             const response = await axios({
                 method: 'get',
                 url: baseUrl,
                 headers,
                 params: {
                     ...(filter ? { filter } : {}),
+                    ...(limit ? { limit } : {}),
+                    ...(offset ? { offset } : {}),
                 },
             });
             return response.data || {};
         };
 
-        const payload = await fetchWithFilter(creationDateFilter);
-        return payload.orders || [];
+        const allOrders = [];
+        for (let page = 0; page < maxPages; page += 1) {
+            const offset = page * pageLimit;
+            const payload = await fetchWithFilter(creationDateFilter, pageLimit, offset);
+            const orders = Array.isArray(payload.orders) ? payload.orders : [];
+            allOrders.push(...orders);
+            if (orders.length < pageLimit) {
+                break;
+            }
+        }
+
+        const deduped = Array.from(
+            new Map(allOrders.map((order) => [order?.orderId, order])).values()
+        ).filter((order) => Boolean(order?.orderId));
+        return deduped;
     } catch (error) {
         console.error('Error fetching orders from eBay:', error);
         throw error;
@@ -1096,6 +1116,18 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     if (!resolvedShippingCarrier && shipcoDetails?.carrier) {
         resolvedShippingCarrier = shipcoDetails.carrier;
         shipcoDataApplied = true;
+    } else if (
+        !resolvedShippingCarrier &&
+        shipcoDetails &&
+        (
+            shipcoDetails.trackingNumber ||
+            shipcoDetails.deliveryRate !== null ||
+            shipcoDetails.parcel
+        )
+    ) {
+        // Ship&Co has shipment data but carrier string can be missing in some responses.
+        resolvedShippingCarrier = 'shipco';
+        shipcoDataApplied = true;
     }
 
     const normalizedCarrier =
@@ -1448,6 +1480,87 @@ async function saveOrdersAndBuyers(userId) {
             });
         }
     }
+
+    const runBackfill = String(process.env.SHIPCO_BACKFILL_MISSING_TRACKING_ON_SYNC || 'true').toLowerCase() !== 'false';
+    if (runBackfill) {
+        try {
+            await backfillRecentShippedOrdersMissingTracking({ userId });
+        } catch (error) {
+            console.error(
+                '[orderService] Ship&Co tracking backfill failed:',
+                error?.message || error
+            );
+        }
+    }
+}
+
+async function backfillRecentShippedOrdersMissingTracking({
+    userId,
+    lookbackDays = Number.parseInt(process.env.SHIPCO_TRACKING_BACKFILL_LOOKBACK_DAYS || '14', 10) || 14,
+    limit = Number.parseInt(process.env.SHIPCO_TRACKING_BACKFILL_LIMIT || '200', 10) || 200,
+}) {
+    const cutoff = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: targets, error: targetError } = await supabase
+        .from('orders')
+        .select('id, order_no, shipping_status, shipping_tracking_number, shipping_carrier, shipment_recorded_at, created_at')
+        .eq('user_id', userId)
+        .eq('shipping_status', 'SHIPPED')
+        .is('shipping_tracking_number', null)
+        .or(`shipment_recorded_at.gte.${cutoff},and(shipment_recorded_at.is.null,created_at.gte.${cutoff})`)
+        .order('shipment_recorded_at', { ascending: true, nullsFirst: true })
+        .order('created_at', { ascending: true })
+        .limit(limit);
+
+    if (targetError) {
+        throw new Error(`Failed to load tracking backfill targets: ${targetError.message}`);
+    }
+    if (!Array.isArray(targets) || targets.length === 0) {
+        return { scanned: 0, updated: 0, missing: 0 };
+    }
+
+    let updated = 0;
+    let missing = 0;
+    for (const target of targets) {
+        const orderNo = target?.order_no;
+        if (!orderNo) continue;
+        try {
+            const shipcoDetails = await fetchShipmentDetailsByReference(orderNo);
+            const trackingNumber = shipcoDetails?.trackingNumber || null;
+            const carrier = shipcoDetails?.carrier || null;
+            if (!trackingNumber) {
+                missing += 1;
+                continue;
+            }
+
+            const updatePayload = {
+                shipping_tracking_number: trackingNumber,
+                shipco_synced_at: new Date().toISOString(),
+            };
+            if (carrier && !target.shipping_carrier) {
+                updatePayload.shipping_carrier = carrier;
+            }
+
+            const { error: updateError } = await supabase
+                .from('orders')
+                .update(updatePayload)
+                .eq('id', target.id);
+            if (updateError) {
+                console.warn(
+                    `[orderService] Failed to update tracking backfill for order ${orderNo}: ${updateError.message}`
+                );
+                continue;
+            }
+            updated += 1;
+        } catch (error) {
+            console.warn(
+                `[orderService] Ship&Co lookup failed during tracking backfill for order ${orderNo}:`,
+                error?.message || error
+            );
+        }
+    }
+
+    return { scanned: targets.length, updated, missing };
 }
 
 
@@ -1465,7 +1578,7 @@ async function getOrdersByUserId(userId) {
         .map((order) => attachFinancialsToOrder(order, exchangeRates));
 };
 
-// ebay上で未発送かつ発送後のmsgを送っていないデータを取得
+// 注文一覧用に、未発送系は直近3か月を取得する
 async function fetchRelevantOrders(userId) {
     const threeMonthsAgo = new Date();
     threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
@@ -1476,8 +1589,7 @@ async function fetchRelevantOrders(userId) {
         .eq('user_id', userId)
         .or('shipping_status.neq.SHIPPED,delivered_msg_status.neq.SEND')
         .gte('order_date', threeMonthsAgo.toISOString())
-        .neq('status', 'FULLY_REFUNDED')
-        .neq('status', 'CANCELED')
+        .not('status', 'in', '("FULLY_REFUNDED","CANCELED")')
         .order('order_date', { ascending: false })
         .order('created_at', { ascending: true, foreignTable: 'order_line_items' });
 
@@ -1504,6 +1616,72 @@ async function fetchRelevantOrders(userId) {
         }
     }
     return orders
+        .map(attachNormalizedLineItemsToOrder)
+        .map((order) => ({
+            ...order,
+            shipment_group: groupLabelMap[order.order_no] || null,
+        }))
+        .map((order) => attachFinancialsToOrder(order, exchangeRates));
+}
+
+async function fetchShippedOrders(userId) {
+    const { data, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('shipping_status', 'SHIPPED')
+        .not('status', 'in', '("FULLY_REFUNDED","CANCELED")')
+        .order('order_date', { ascending: false })
+        .limit(5000);
+
+    if (error) {
+        console.error('Error fetching shipped orders:', error.message);
+        return [];
+    }
+
+    const exchangeRates = await loadUserExchangeRates(userId);
+    const orders = data || [];
+    const orderNos = orders.map((order) => order.order_no).filter(Boolean);
+    const lineItemsByOrderNo = {};
+    let groupLabelMap = {};
+    if (orderNos.length > 0) {
+        for (let index = 0; index < orderNos.length; index += 500) {
+            const chunk = orderNos.slice(index, index + 500);
+
+            const { data: lineItems, error: lineItemsError } = await supabase
+                .from('order_line_items')
+                .select('*')
+                .in('order_no', chunk)
+                .order('created_at', { ascending: true });
+            if (!lineItemsError && Array.isArray(lineItems)) {
+                for (const item of lineItems) {
+                    const orderNo = item?.order_no;
+                    if (!orderNo) continue;
+                    if (!lineItemsByOrderNo[orderNo]) {
+                        lineItemsByOrderNo[orderNo] = [];
+                    }
+                    lineItemsByOrderNo[orderNo].push(item);
+                }
+            }
+
+            const { data: groupLinks, error: groupError } = await supabase
+                .from('shipment_group_orders')
+                .select('order_no, shipment_groups(label_url, tracking_number, shipping_carrier)')
+                .in('order_no', chunk);
+            if (!groupError && Array.isArray(groupLinks)) {
+                groupLabelMap = groupLinks.reduce((acc, link) => {
+                    if (!link?.order_no) return acc;
+                    acc[link.order_no] = link.shipment_groups || null;
+                    return acc;
+                }, groupLabelMap);
+            }
+        }
+    }
+    return orders
+        .map((order) => ({
+            ...order,
+            order_line_items: lineItemsByOrderNo[order.order_no] || [],
+        }))
         .map(attachNormalizedLineItemsToOrder)
         .map((order) => ({
             ...order,
@@ -1993,6 +2171,7 @@ module.exports = {
     saveOrdersAndBuyers,
     getOrdersByUserId,
     fetchRelevantOrders,
+    fetchShippedOrders,
     fetchOrderByOrderNo,
     fetchArchivedOrders,
     fetchArchivedSummary,
@@ -2006,4 +2185,5 @@ module.exports = {
     normalizeProcurementStatusValue,
     uploadTrackingInfoToEbay: uploadTrackingInfoToEbayProxy,
     addOrderLineItemToInventoryTarget,
+    backfillRecentShippedOrdersMissingTracking,
 };

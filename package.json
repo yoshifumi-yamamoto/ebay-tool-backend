@@ -17,6 +17,9 @@
     "url": "https://github.com/yoshifumi-yamamoto/ebay-tool-backend/issues"
   },
   "homepage": "https://github.com/yoshifumi-yamamoto/ebay-tool-backend#readme",
+  "engines": {
+    "node": ">=20 <25"
+  },
   "dependencies": {
     "@google-cloud/logging": "^11.2.0",
     "@supabase/supabase-js": "^2.42.4",

@@ -4,6 +4,7 @@ const orderController = require('../controllers/orderController');
 
 // 特定のユーザーIDに紐づくすべての注文情報を取得
 router.get('/user', orderController.getOrdersByUserId);
+router.get('/user/shipped', orderController.getShippedOrdersByUserId);
 router.get('/by-order-no', orderController.getOrderByOrderNo);
 router.get('/archived', orderController.getArchivedOrdersByUserId);
 router.get('/archived-summary', orderController.getArchivedSummary);

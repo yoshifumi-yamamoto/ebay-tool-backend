@@ -1,9 +1,97 @@
 const axios = require('axios');
 const supabase = require('../supabaseClient');
 const { getAccountById, refreshEbayToken } = require('./accountService');
+const {
+    fetchActiveListings,
+    refreshEbayToken: refreshTradingToken,
+    updateItemsTable,
+    fetchItemDetails,
+} = require('./itemService');
 
 const EBAY_MARKETING_API_BASE = 'https://api.ebay.com/sell/marketing/v1';
 const PRL_ACCOUNT_CONCURRENCY = 4;
+const NEGOTIATION_API_BASE = 'https://api.ebay.com/sell/negotiation/v1';
+const SEND_OFFER_BACKFILL_MAX_PAGES = Number(process.env.SEND_OFFER_BACKFILL_MAX_PAGES || 10);
+const SEND_OFFER_DETAIL_BACKFILL_MAX = Number(process.env.SEND_OFFER_DETAIL_BACKFILL_MAX || 50);
+
+const normalizeLegacyItemId = (value) => {
+    if (value === null || value === undefined) return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+
+    const candidates = [];
+    const addCandidate = (candidate) => {
+        const normalized = candidate === null || candidate === undefined ? '' : String(candidate).trim();
+        if (!normalized) return;
+        if (!candidates.includes(normalized)) {
+            candidates.push(normalized);
+        }
+    };
+
+    addCandidate(raw);
+
+    // Common eBay REST forms:
+    // - v1|123456789012|0
+    // - https://api.ebay.com/buy/browse/v1/item/v1|123456789012|0
+    // - /buy/browse/v1/item/v1|123456789012|0
+    const lastPathToken = raw.split('/').filter(Boolean).pop();
+    addCandidate(lastPathToken);
+
+    const pipeMatch = raw.match(/(?:^|\/)v1\|(\d+)\|\d+$/i);
+    if (pipeMatch?.[1]) {
+        addCandidate(pipeMatch[1]);
+    }
+
+    const trailingDigitsMatch = raw.match(/(\d{9,})$/);
+    if (trailingDigitsMatch?.[1]) {
+        addCandidate(trailingDigitsMatch[1]);
+    }
+
+    return candidates[0] || null;
+};
+
+const collectLegacyItemIdCandidates = (value) => {
+    if (value === null || value === undefined) return [];
+    const raw = String(value).trim();
+    if (!raw) return [];
+
+    const candidates = [];
+    const addCandidate = (candidate) => {
+        const normalized = candidate === null || candidate === undefined ? '' : String(candidate).trim();
+        if (!normalized) return;
+        if (!candidates.includes(normalized)) {
+            candidates.push(normalized);
+        }
+    };
+
+    addCandidate(raw);
+
+    const normalized = normalizeLegacyItemId(raw);
+    addCandidate(normalized);
+
+    const lastPathToken = raw.split('/').filter(Boolean).pop();
+    addCandidate(lastPathToken);
+
+    const pipeMatch = raw.match(/(?:^|\/)v1\|(\d+)\|\d+$/i);
+    if (pipeMatch?.[1]) {
+        addCandidate(pipeMatch[1]);
+    }
+
+    const trailingDigitsMatch = raw.match(/(\d{9,})$/);
+    if (trailingDigitsMatch?.[1]) {
+        addCandidate(trailingDigitsMatch[1]);
+    }
+
+    return candidates;
+};
+
+const hasUsableItemData = (row) => {
+    if (!row) return false;
+    const hasTitle = !!String(row.item_title || '').trim();
+    const hasPrice = row.current_price_value !== null && row.current_price_value !== undefined && String(row.current_price_value).trim() !== '';
+    const hasImage = !!String(row.primary_image_url || '').trim();
+    return hasTitle || hasPrice || hasImage;
+};
 
 async function getSendOfferEligibleItems(accountId, { limit = 20, offset = 0 } = {}) {
     if (!accountId) {
@@ -23,7 +111,7 @@ async function getSendOfferEligibleItems(accountId, { limit = 20, offset = 0 } =
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const marketplaceId = account.marketplace_id || process.env.EBAY_MARKETPLACE_ID || 'EBAY_US';
 
-    const url = 'https://api.ebay.com/sell/negotiation/v1/find_eligible_items';
+    const url = `${NEGOTIATION_API_BASE}/find_eligible_items`;
 
     try {
         const { data } = await axios.get(url, {
@@ -35,7 +123,235 @@ async function getSendOfferEligibleItems(accountId, { limit = 20, offset = 0 } =
                 'Accept-Language': 'en-US'
             }
         });
-        return data;
+        const eligibleItems = data?.eligibleItemSummaries || data?.eligibleItems || data?.items || [];
+        if (!Array.isArray(eligibleItems) || eligibleItems.length === 0) {
+            return data;
+        }
+
+        const itemIdCandidatesByLookupId = {};
+        const lookupIds = eligibleItems
+            .map((item) => String(item?.itemId || item?.listingId || '').trim())
+            .filter(Boolean);
+        const uniqueLookupIds = Array.from(new Set(lookupIds));
+        const uniqueItemIds = Array.from(new Set(
+            uniqueLookupIds.flatMap((lookupId) => {
+                const candidates = collectLegacyItemIdCandidates(lookupId);
+                itemIdCandidatesByLookupId[lookupId] = candidates;
+                return candidates;
+            })
+        ));
+        const itemMap = {};
+        const setItemMapRow = (sourceId, row) => {
+            for (const candidate of collectLegacyItemIdCandidates(sourceId)) {
+                itemMap[candidate] = row;
+            }
+        };
+
+        // eBay API response can be sparse (itemId only), so enrich from local items table.
+        const enrichByIds = async (chunk, mode = 'strict') => {
+            let query = supabase
+                .from('items')
+                .select('ebay_item_id, item_title, current_price_value, current_price_currency, primary_image_url')
+                .in('ebay_item_id', chunk);
+            if (mode === 'strict') {
+                query = query
+                    .eq('user_id', account.user_id)
+                    .eq('ebay_user_id', account.ebay_user_id);
+            } else if (mode === 'user_only') {
+                query = query.eq('user_id', account.user_id);
+            }
+            const { data: rows, error } = await query;
+            if (error) throw error;
+            for (const row of rows || []) {
+                const rowId = String(row.ebay_item_id);
+                for (const candidate of collectLegacyItemIdCandidates(rowId)) {
+                    if (!itemMap[candidate] || !hasUsableItemData(itemMap[candidate])) {
+                        itemMap[candidate] = row;
+                    }
+                }
+            }
+            return (rows || []).length;
+        };
+
+        const enrichFromDb = async () => {
+            for (let i = 0; i < uniqueItemIds.length; i += 500) {
+                const chunk = uniqueItemIds.slice(i, i + 500);
+                try {
+                    const matched = await enrichByIds(chunk, 'strict');
+                    // Fallback 1: ebay_user_id mismatch.
+                    if (matched === 0) {
+                        const matchedUserOnly = await enrichByIds(chunk, 'user_only');
+                        // Fallback 2: data belongs to another user_id row (legacy import etc).
+                        if (matchedUserOnly === 0) {
+                            await enrichByIds(chunk, 'global');
+                        }
+                    }
+                } catch (error) {
+                    throw new Error(`Failed to enrich eligible items: ${error.message}`);
+                }
+            }
+        };
+
+        await enrichFromDb();
+
+        const missingIds = uniqueItemIds.filter((id) => !hasUsableItemData(itemMap[id]));
+        let backfillStats = null;
+        // Backfill only missing listings by scanning active listings pages and upserting matches.
+        if (missingIds.length > 0) {
+            const missingSet = new Set(missingIds);
+            let scannedPages = 0;
+            let foundInEbay = 0;
+            let filledByGetItem = 0;
+            try {
+                const tradingToken = await refreshTradingToken(account.refresh_token);
+                for (let page = 1; page <= Math.max(1, SEND_OFFER_BACKFILL_MAX_PAGES); page += 1) {
+                    const pageData = await fetchActiveListings(tradingToken, page, 100);
+                    scannedPages += 1;
+                    const listings = pageData?.listings || [];
+                    const matchedListings = listings.filter((listing) => {
+                        const listingCandidates = collectLegacyItemIdCandidates(listing?.legacyItemId);
+                        return listingCandidates.some((candidate) => missingSet.has(candidate));
+                    });
+                    if (matchedListings.length > 0) {
+                        foundInEbay += matchedListings.length;
+                        await updateItemsTable(matchedListings, account.user_id, account.ebay_user_id);
+                        for (const listing of matchedListings) {
+                            setItemMapRow(listing?.legacyItemId, {
+                                ebay_item_id: normalizeLegacyItemId(listing?.legacyItemId) || String(listing?.legacyItemId || ''),
+                                item_title: listing?.item_title || null,
+                                current_price_value: listing?.current_price_value ?? null,
+                                current_price_currency: listing?.current_price_currency || null,
+                                primary_image_url: listing?.primary_image_url || null,
+                            });
+                            for (const candidate of collectLegacyItemIdCandidates(listing?.legacyItemId)) {
+                                missingSet.delete(candidate);
+                            }
+                        }
+                    }
+                    if (missingSet.size === 0) break;
+                    if (!pageData?.hasMoreItems) break;
+                }
+
+                // Fallback: fetch each unresolved listing detail directly via Trading GetItem.
+                const unresolved = Array.from(missingSet).slice(0, Math.max(1, SEND_OFFER_DETAIL_BACKFILL_MAX));
+                const getTextValue = (value) => {
+                    if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, '_')) {
+                        return value._;
+                    }
+                    return value ?? null;
+                };
+                for (const unresolvedId of unresolved) {
+                    const legacyItemId = normalizeLegacyItemId(unresolvedId);
+                    if (!legacyItemId) continue;
+                    try {
+                        const detail = await fetchItemDetails(legacyItemId, tradingToken);
+                        const currentPrice = detail?.StartPrice || detail?.SellingStatus?.CurrentPrice;
+                        const primaryImage = Array.isArray(detail?.PictureDetails?.PictureURL)
+                            ? detail.PictureDetails.PictureURL[0]
+                            : detail?.PictureDetails?.PictureURL;
+                        const payload = {
+                            item_title: getTextValue(detail?.Title),
+                            current_price_value: getTextValue(currentPrice),
+                            current_price_currency: currentPrice?.$?.currencyID || null,
+                            primary_image_url: primaryImage || null,
+                            category_id: getTextValue(detail?.PrimaryCategory?.CategoryID),
+                            category_name: getTextValue(detail?.PrimaryCategory?.CategoryName),
+                            view_item_url: getTextValue(detail?.ListingDetails?.ViewItemURL) || getTextValue(detail?.ListingDetails?.ViewItemURLForNaturalSearch),
+                            updated_at: new Date().toISOString(),
+                        };
+                        const { data: updatedRows, error: updateError } = await supabase
+                            .from('items')
+                            .update(payload)
+                            .eq('user_id', account.user_id)
+                            .eq('ebay_item_id', legacyItemId)
+                            .select('ebay_item_id');
+                        if (updateError) {
+                            throw updateError;
+                        }
+
+                        // If no existing row matched, create one for this account.
+                        if (!updatedRows || updatedRows.length === 0) {
+                            const upsertPayload = {
+                                ebay_item_id: legacyItemId,
+                                user_id: account.user_id,
+                                ebay_user_id: account.ebay_user_id,
+                                ...payload,
+                            };
+                            const { error: insertError } = await supabase
+                                .from('items')
+                                .upsert(upsertPayload, { onConflict: 'ebay_item_id,ebay_user_id' });
+                            if (insertError) {
+                                throw insertError;
+                            }
+                        }
+                        setItemMapRow(unresolvedId, {
+                            ebay_item_id: legacyItemId,
+                            item_title: payload.item_title,
+                            current_price_value: payload.current_price_value,
+                            current_price_currency: payload.current_price_currency,
+                            primary_image_url: payload.primary_image_url,
+                        });
+                        filledByGetItem += 1;
+                        for (const candidate of collectLegacyItemIdCandidates(unresolvedId)) {
+                            missingSet.delete(candidate);
+                        }
+                    } catch (detailError) {
+                        console.warn('[marketing] GetItem detail backfill failed', {
+                            accountId,
+                            legacyItemId,
+                            message: detailError.message,
+                        });
+                    }
+                }
+            } catch (backfillError) {
+                console.warn('[marketing] send-offer backfill failed', {
+                    accountId,
+                    message: backfillError.message,
+                });
+            }
+
+            // Re-enrich after backfill attempt.
+            await enrichFromDb();
+            backfillStats = {
+                requestedBackfillCount: missingIds.length,
+                unresolvedAfterBackfill: uniqueItemIds.filter((id) => !hasUsableItemData(itemMap[id])).length,
+                scannedPages,
+                foundInEbay,
+                filledByGetItem,
+            };
+        }
+
+        const merged = eligibleItems.map((item) => {
+            const lookupId = String(item?.itemId || item?.listingId || '');
+            const db = (itemIdCandidatesByLookupId[lookupId] || []).map((candidate) => itemMap[candidate]).find(Boolean) || null;
+            const hasApiPrice = item?.currentPrice?.value !== undefined && item?.currentPrice?.value !== null;
+            return {
+                ...item,
+                title: item?.title || db?.item_title || null,
+                imageUrl: item?.imageUrl || db?.primary_image_url || null,
+                // Some accounts return only itemId; fallback listingId=itemId for selection key.
+                listingId: item?.listingId || item?.itemId || null,
+                currentPrice: hasApiPrice
+                    ? item.currentPrice
+                    : (db?.current_price_value !== null && db?.current_price_value !== undefined)
+                        ? {
+                            value: String(db.current_price_value),
+                            currency: db.current_price_currency || 'USD',
+                        }
+                        : item?.currentPrice || null,
+            };
+        });
+
+        return {
+            ...data,
+            eligibleItemSummaries: merged,
+            enrichment: {
+                requested: uniqueItemIds.length,
+                resolved: uniqueItemIds.filter((id) => hasUsableItemData(itemMap[id])).length,
+                unresolved: uniqueItemIds.filter((id) => !hasUsableItemData(itemMap[id])).length,
+                backfill: backfillStats,
+            },
+        };
     } catch (err) {
         const status = err?.response?.status;
         const responseData = err?.response?.data;
@@ -45,6 +361,212 @@ async function getSendOfferEligibleItems(accountId, { limit = 20, offset = 0 } =
         error.responseData = responseData;
         throw error;
     }
+}
+
+const toFiniteNumber = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return numeric;
+};
+
+const getAccountAccess = async (accountId) => {
+    if (!accountId) {
+        throw new Error('accountId is required');
+    }
+    const account = await getAccountById(accountId);
+    if (!account) {
+        throw new Error('Account not found');
+    }
+    if (!account.refresh_token) {
+        throw new Error('Account does not have a refresh token');
+    }
+    const accessToken = await refreshEbayToken(account.refresh_token);
+    const marketplaceId = account.marketplace_id || process.env.EBAY_MARKETPLACE_ID || 'EBAY_US';
+    return { account, accessToken, marketplaceId };
+};
+
+const normalizeIsoDate = (value, isEndDate = false) => {
+    if (!value) return null;
+    const trimmed = String(value).trim();
+    if (!trimmed) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        return isEndDate ? `${trimmed}T23:59:59.000Z` : `${trimmed}T00:00:00.000Z`;
+    }
+    const parsed = new Date(trimmed);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString();
+};
+
+async function fetchEligibleItemsAll({ accessToken, marketplaceId, maxItems = 1000 }) {
+    const items = [];
+    let offset = 0;
+    const limit = 200;
+    while (items.length < maxItems) {
+        const { data } = await axios.get(`${NEGOTIATION_API_BASE}/find_eligible_items`, {
+            params: { limit, offset },
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+                'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+                'Accept-Language': 'en-US',
+            },
+        });
+        const pageItems = data?.eligibleItemSummaries || data?.eligibleItems || data?.items || [];
+        items.push(...pageItems);
+        if (pageItems.length < limit) break;
+        offset += limit;
+    }
+    return items.slice(0, maxItems);
+}
+
+function filterItemsByPrice(items, minPrice = null, maxPrice = null) {
+    const min = toFiniteNumber(minPrice);
+    const max = toFiniteNumber(maxPrice);
+    return (items || []).filter((item) => {
+        const price = toFiniteNumber(item?.currentPrice?.value);
+        if (price === null) {
+            return min === null && max === null;
+        }
+        if (min !== null && price < min) return false;
+        if (max !== null && price > max) return false;
+        return true;
+    });
+}
+
+const getOfferItemIdentifier = (item) => String(item?.listingId || item?.itemId || '').trim();
+
+async function sendOfferToInterestedBuyers({
+    accountId,
+    discountType,
+    discountValue,
+    message = '',
+    minPrice = null,
+    maxPrice = null,
+    listingIds = [],
+}) {
+    const normalizedType = String(discountType || '').trim().toLowerCase();
+    const numericDiscount = toFiniteNumber(discountValue);
+    if (!['rate', 'amount'].includes(normalizedType)) {
+        throw new Error('discountType must be "rate" or "amount"');
+    }
+    if (numericDiscount === null || numericDiscount <= 0) {
+        throw new Error('discountValue must be a positive number');
+    }
+    if (normalizedType === 'rate' && numericDiscount >= 100) {
+        throw new Error('discountValue for rate must be < 100');
+    }
+
+    const { accessToken, marketplaceId } = await getAccountAccess(accountId);
+    const eligibleItems = await fetchEligibleItemsAll({ accessToken, marketplaceId, maxItems: 1000 });
+    const byPrice = filterItemsByPrice(eligibleItems, minPrice, maxPrice);
+    const listingFilterSet = new Set((listingIds || []).map((id) => String(id)));
+    const targetItems = listingFilterSet.size > 0
+        ? byPrice.filter((item) => listingFilterSet.has(getOfferItemIdentifier(item)))
+        : byPrice;
+
+    console.info('[marketing] sendOfferToInterestedBuyers start', {
+        accountId,
+        marketplaceId,
+        discountType: normalizedType,
+        discountValue: numericDiscount,
+        requestedListingIds: Array.from(listingFilterSet),
+        scannedEligibleCount: eligibleItems.length,
+        filteredEligibleCount: byPrice.length,
+        targetCount: targetItems.length,
+        targetIdentifiers: targetItems.map((item) => getOfferItemIdentifier(item)),
+    });
+
+    const results = [];
+    for (const item of targetItems) {
+        const listingId = getOfferItemIdentifier(item);
+        if (!listingId) {
+            results.push({ listingId: null, success: false, error: 'Listing ID / Item ID not found' });
+            continue;
+        }
+        const payload = {
+            allowCounterOffer: false,
+            message: String(message || '').slice(0, 2000),
+            offeredItems: [{
+                listingId,
+                quantity: 1,
+            }],
+        };
+        if (normalizedType === 'rate') {
+            payload.offeredItems[0].discountPercentage = String(numericDiscount);
+        } else {
+            const current = toFiniteNumber(item?.currentPrice?.value);
+            const currency = item?.currentPrice?.currency || 'USD';
+            if (current === null) {
+                results.push({ listingId, success: false, error: 'Current price not found' });
+                continue;
+            }
+            const offered = Math.max(0.01, current - numericDiscount);
+            payload.offeredItems[0].price = {
+                value: offered.toFixed(2),
+                currency,
+            };
+        }
+
+        try {
+            console.info('[marketing] send_offer_to_interested_buyers request', {
+                accountId,
+                marketplaceId,
+                listingId,
+                payload,
+            });
+            const { data } = await axios.post(`${NEGOTIATION_API_BASE}/send_offer_to_interested_buyers`, payload, {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                    'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+                    'Accept-Language': 'en-US',
+                },
+            });
+            console.info('[marketing] send_offer_to_interested_buyers response', {
+                accountId,
+                marketplaceId,
+                listingId,
+                response: data || null,
+            });
+            results.push({
+                listingId,
+                success: true,
+                data: data || null,
+            });
+        } catch (err) {
+            console.warn('[marketing] send_offer_to_interested_buyers error', {
+                accountId,
+                marketplaceId,
+                listingId,
+                status: err?.response?.status || null,
+                response: err?.response?.data || null,
+                message: err.message,
+            });
+            results.push({
+                listingId,
+                success: false,
+                error: err?.response?.data?.errors || err?.response?.data?.error || err.message || 'Failed to send offer',
+            });
+        }
+    }
+
+    const successCount = results.filter((row) => row.success).length;
+    console.info('[marketing] sendOfferToInterestedBuyers summary', {
+        accountId,
+        marketplaceId,
+        successCount,
+        failureCount: results.length - successCount,
+        results,
+    });
+    return {
+        scannedEligibleCount: eligibleItems.length,
+        filteredEligibleCount: byPrice.length,
+        targetCount: targetItems.length,
+        successCount,
+        failureCount: results.length - successCount,
+        results,
+    };
 }
 
 const normalizeBidPercentage = (value) => {
@@ -129,16 +651,116 @@ const bulkCreateAdsByListingId = async (accessToken, campaignId, listingIds, bid
 };
 
 const normalizeEndDate = (value) => {
-    if (!value) return null;
-    const trimmed = String(value).trim();
-    if (!trimmed) return null;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-        return `${trimmed}T23:59:59.000Z`;
-    }
-    const parsed = new Date(trimmed);
-    if (Number.isNaN(parsed.getTime())) return null;
-    return parsed.toISOString();
+    return normalizeIsoDate(value, true);
 };
+
+async function getMarkdownCategoryCandidates(accountId, { limit = 200 } = {}) {
+    const { account } = await getAccountAccess(accountId);
+    const { data, error } = await supabase
+        .from('items')
+        .select('category_id')
+        .eq('user_id', account.user_id)
+        .eq('ebay_user_id', account.ebay_user_id)
+        .eq('listing_status', 'ACTIVE')
+        .not('category_id', 'is', null)
+        .limit(Math.min(Math.max(Number(limit) || 0, 1), 1000));
+    if (error) {
+        throw new Error(`Failed to fetch categories: ${error.message}`);
+    }
+    const counts = new Map();
+    for (const row of data || []) {
+        const categoryId = String(row.category_id || '').trim();
+        if (!categoryId) continue;
+        counts.set(categoryId, (counts.get(categoryId) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+        .map(([categoryId, itemCount]) => ({ categoryId, itemCount }))
+        .sort((a, b) => b.itemCount - a.itemCount);
+}
+
+async function createMarkdownSaleEvent({
+    accountId,
+    discountPercent,
+    startDate,
+    endDate,
+    categoryIds = [],
+    minPrice = null,
+    maxPrice = null,
+    name = '',
+    description = '',
+}) {
+    const normalizedPercent = toFiniteNumber(discountPercent);
+    if (normalizedPercent === null || normalizedPercent <= 0 || normalizedPercent >= 100) {
+        throw new Error('discountPercent must be between 0 and 100');
+    }
+    const normalizedStart = normalizeIsoDate(startDate, false);
+    const normalizedEnd = normalizeIsoDate(endDate, true);
+    if (!normalizedStart || !normalizedEnd) {
+        throw new Error('startDate and endDate are required (YYYY-MM-DD)');
+    }
+
+    const { account, accessToken, marketplaceId } = await getAccountAccess(accountId);
+    let query = supabase
+        .from('items')
+        .select('ebay_item_id, category_id, current_price_value')
+        .eq('user_id', account.user_id)
+        .eq('ebay_user_id', account.ebay_user_id)
+        .eq('listing_status', 'ACTIVE')
+        .not('ebay_item_id', 'is', null);
+
+    const categoryList = (categoryIds || []).map((id) => String(id).trim()).filter(Boolean);
+    if (categoryList.length > 0) {
+        query = query.in('category_id', categoryList);
+    }
+
+    const min = toFiniteNumber(minPrice);
+    const max = toFiniteNumber(maxPrice);
+    if (min !== null) query = query.gte('current_price_value', min);
+    if (max !== null) query = query.lte('current_price_value', max);
+
+    const { data: listings, error: listingError } = await query.limit(2000);
+    if (listingError) {
+        throw new Error(`Failed to fetch listing candidates: ${listingError.message}`);
+    }
+    const listingIds = (listings || []).map((row) => String(row.ebay_item_id || '')).filter(Boolean);
+    if (listingIds.length === 0) {
+        throw new Error('No active listings match filters');
+    }
+
+    const payload = {
+        name: String(name || `Markdown ${new Date().toISOString().slice(0, 10)}`),
+        description: String(description || `Markdown ${normalizedPercent}%`),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        marketplaceId,
+        promotionStatus: 'SCHEDULED',
+        selectedInventoryDiscounts: [{
+            inventoryCriterion: {
+                inventoryCriterionType: 'INVENTORY_BY_VALUE',
+                listingIds,
+            },
+            discountBenefit: {
+                percentageOffItem: String(normalizedPercent),
+            },
+        }],
+    };
+
+    const response = await axios.post(`${EBAY_MARKETING_API_BASE}/item_price_markdown`, payload, {
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+        },
+    });
+    const location = response?.headers?.location || null;
+    const promotionId = location ? String(location).split('/').pop() : null;
+
+    return {
+        promotionId,
+        location,
+        listingCount: listingIds.length,
+        marketplaceId,
+    };
+}
 
 async function bulkApplyPromotedListings({ accountIds = [], bidPercentage, endDate = null }) {
     if (!Array.isArray(accountIds) || accountIds.length === 0) {
@@ -220,5 +842,8 @@ async function bulkApplyPromotedListings({ accountIds = [], bidPercentage, endDa
 
 module.exports = {
     getSendOfferEligibleItems,
+    sendOfferToInterestedBuyers,
+    getMarkdownCategoryCandidates,
+    createMarkdownSaleEvent,
     bulkApplyPromotedListings,
 };
