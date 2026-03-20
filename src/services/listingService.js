@@ -196,7 +196,7 @@ async function updateSupabaseWithEndedListings(userId) {
             const supabaseEndTime = Date.now();
             console.log(`Supabase writes took ${supabaseEndTime - supabaseStartTime}ms`); // Supabase書き込み時間をログに出力
 
-            const totalPages = Math.ceil(firstPageData.totalEntries / 100);
+            const totalPages = firstPageData.totalPages || 0;
             console.log("ebay_user_id sync", ebayUserId)
             console.log("totalPages", totalPages)
 

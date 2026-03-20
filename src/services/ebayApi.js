@@ -178,12 +178,19 @@ async function fetchEndedListings(authToken, pageNumber = 1, entriesPerPage = 10
     const parser = new xml2js.Parser();
     const result = await parser.parseStringPromise(response.data);
 
-    const soldList = result.GetMyeBaySellingResponse.SoldList?.[0]?.ItemArray?.[0]?.Item || [];
-    const unsoldList = result.GetMyeBaySellingResponse.UnsoldList?.[0]?.ItemArray?.[0]?.Item || [];
+    const soldRoot = result.GetMyeBaySellingResponse.SoldList?.[0] || {};
+    const unsoldRoot = result.GetMyeBaySellingResponse.UnsoldList?.[0] || {};
+    const soldList = soldRoot.ItemArray?.[0]?.Item || [];
+    const unsoldList = unsoldRoot.ItemArray?.[0]?.Item || [];
+    const soldEntries = parseInt(soldRoot.PaginationResult?.[0]?.TotalNumberOfEntries?.[0], 10) || 0;
+    const unsoldEntries = parseInt(unsoldRoot.PaginationResult?.[0]?.TotalNumberOfEntries?.[0], 10) || 0;
+    const totalPages = Math.max(
+      Math.ceil(soldEntries / entriesPerPage),
+      Math.ceil(unsoldEntries / entriesPerPage),
+    );
 
-    const totalEntries = parseInt(result.GetMyeBaySellingResponse.ActiveList?.[0]?.PaginationResult?.[0]?.TotalNumberOfEntries?.[0], 10) || 0;
-
-    console.log(`Total entries found: ${totalEntries}`);
+    console.log(`Total sold entries found: ${soldEntries}`);
+    console.log(`Total unsold entries found: ${unsoldEntries}`);
 
 
     // 終了したリストを作成
@@ -198,7 +205,13 @@ async function fetchEndedListings(authToken, pageNumber = 1, entriesPerPage = 10
       }))
     ];
 
-    return { listings, totalEntries };
+    return {
+      listings,
+      soldEntries,
+      unsoldEntries,
+      totalPages,
+      hasMoreItems: pageNumber < totalPages,
+    };
   } catch (error) {
     console.error('Error fetching ended listings from eBay:', error.message);
     // itemIdを利用できる場合はログに追加

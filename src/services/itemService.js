@@ -267,7 +267,8 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
             return {
                 legacyItemId: getTextValue(item.ItemID),
                 sku: getTextValue(item?.SKU),
-                status: (item?.SellingStatus?.ListingStatus || 'UNKNOWN').toUpperCase(),
+                // GetMyeBaySelling.ActiveList only returns active listings and does not include ListingStatus.
+                status: 'ACTIVE',
                 category_id: getTextValue(item?.PrimaryCategory?.CategoryID),
                 category_name: getTextValue(item?.PrimaryCategory?.CategoryName),
                 category_path: null,
@@ -325,6 +326,7 @@ async function updateItemsTable(listings, userId, ebayUserId) {
         const {
             legacyItemId,
             sku,
+            status,
             item_title,
             category_id,
             category_name,
@@ -354,6 +356,8 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                         .from('items')
                         .update({
                             last_synced_at: syncedAt,
+                            listing_status: status,
+                            status_synced_at: syncedAt,
                             category_id,
                             category_name,
                             category_path,
@@ -380,6 +384,8 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                             sku,
                             ebay_user_id: ebayUserId,
                             last_synced_at: syncedAt,
+                            listing_status: status,
+                            status_synced_at: syncedAt,
                             category_id,
                             category_name,
                             category_path,
