@@ -175,21 +175,23 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
       });
     });
 
-  // 深夜1時にsync APIを実行するCronJob
+  // 深夜1時にsync APIを実行し、月曜は完了後にended listingsも続けて実行する
   const runSyncApiJob = new CronJob('0 1 * * *', () => {
-      runCurl('sync listings', ['-X', 'GET', `${baseUrl}/api/listings/sync?userId=2`]).catch(() => {});
+    const isMonday = new Date().getDay() === 1;
+
+    runCurl('sync listings', ['-X', 'GET', `${baseUrl}/api/listings/sync?userId=2`])
+      .then(() => {
+        if (!isMonday) {
+          return null;
+        }
+
+        return runCurl('sync ended listings', ['-X', 'GET', `${baseUrl}/api/listings/sync-ended-listings?userId=2`]);
+      })
+      .catch(() => {});
   }, null, true, 'Asia/Tokyo');
 
   // CronJobの開始
   runSyncApiJob.start();
-
-    // 毎週月曜日の深夜1時にsync-ended-listings APIを実行するCronJob
-    const runSyncEndedListingsApiJob = new CronJob('0 1 * * 1', () => {
-      runCurl('sync ended listings', ['-X', 'GET', `${baseUrl}/api/listings/sync-ended-listings?userId=2`]).catch(() => {});
-  }, null, true, 'Asia/Tokyo');
-
-  // CronJobの開始
-  runSyncEndedListingsApiJob.start();
 
   // 毎週月曜日の7時にChatworkのAPIを実行するCronJob
   const runChatworkApiJob = new CronJob('0 7 * * 1', () => {
