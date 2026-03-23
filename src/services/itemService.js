@@ -36,6 +36,31 @@ function isSoldOut(stockStatus) {
     return soldOutPatterns.some(pattern => stockStatus.trim() === pattern);
 }
 
+function mapSiteCodeToMarketplaceId(siteCode) {
+    const normalized = String(siteCode || '').trim();
+    if (!normalized) return null;
+
+    const siteToMarketplace = {
+        US: 'EBAY_US',
+        UK: 'EBAY_GB',
+        GB: 'EBAY_GB',
+        Germany: 'EBAY_DE',
+        DE: 'EBAY_DE',
+        Australia: 'EBAY_AU',
+        AU: 'EBAY_AU',
+        Canada: 'EBAY_CA',
+        CA: 'EBAY_CA',
+        France: 'EBAY_FR',
+        FR: 'EBAY_FR',
+        Italy: 'EBAY_IT',
+        IT: 'EBAY_IT',
+        Spain: 'EBAY_ES',
+        ES: 'EBAY_ES',
+    };
+
+    return siteToMarketplace[normalized] || null;
+}
+
 function formatForEbayAPI(octoparseData, matchingItems) {
     return octoparseData.map((data) => {
         const quantity = isSoldOut(data["在庫"]) ? 0 : parseInt(data["在庫"], 10) || 1; // 数量が空の場合に1をデフォルト設定
@@ -269,6 +294,8 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                 sku: getTextValue(item?.SKU),
                 // GetMyeBaySelling.ActiveList only returns active listings and does not include ListingStatus.
                 status: 'ACTIVE',
+                site_code: getTextValue(item?.Site),
+                marketplace_id: mapSiteCodeToMarketplaceId(getTextValue(item?.Site)),
                 category_id: getTextValue(item?.PrimaryCategory?.CategoryID),
                 category_name: getTextValue(item?.PrimaryCategory?.CategoryName),
                 category_path: null,
@@ -331,6 +358,7 @@ async function updateItemsTable(listings, userId, ebayUserId) {
             category_id,
             category_name,
             category_path,
+            marketplace_id,
             current_price_value,
             current_price_currency,
             primary_image_url,
@@ -363,6 +391,7 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                             category_path,
                             item_title,
                             sku,
+                            marketplace_id,
                             current_price_value,
                             current_price_currency,
                             primary_image_url,
@@ -391,6 +420,7 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                             category_path,
                             current_price_value,
                             current_price_currency,
+                            marketplace_id,
                             primary_image_url,
                             view_item_url
                         });
