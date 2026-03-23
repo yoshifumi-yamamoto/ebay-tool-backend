@@ -1,6 +1,5 @@
 const express = require('express');
 const { fetchSchedules, saveSchedule, updateScheduleStatus } = require('../controllers/scheduleController');
-const { scheduleInventoryUpdates } = require('../scheduler');
 
 const router = express.Router();
 
@@ -11,11 +10,9 @@ router.get('/:taskId', fetchSchedules);
 router.post('/', async (req, res) => {
     try {
         await saveSchedule(req, res);
-        await scheduleInventoryUpdates(); // スケジュール更新後にクーロンジョブを再設定
-        console.log("cron jobs Updated!!")
     } catch (error) {
-        console.error('Error saving schedule and rescheduling cron jobs:', error);
-        res.status(500).send('Error saving schedule and rescheduling cron jobs');
+        console.error('Error saving schedule:', error);
+        res.status(500).send('Error saving schedule');
     }
 });
 
@@ -23,11 +20,9 @@ router.post('/', async (req, res) => {
 router.put('/status/:taskId', async (req, res) => {
     try {
         await updateScheduleStatus(req, res);
-        await scheduleInventoryUpdates(); // スケジュールステータス更新後にクーロンジョブを再設定
-        console.log("cron jobs Updated!!")
     } catch (error) {
-        console.error('Error updating schedule status and rescheduling cron jobs:', error);
-        res.status(500).send('Error updating schedule status and rescheduling cron jobs');
+        console.error('Error updating schedule status:', error);
+        res.status(500).send('Error updating schedule status');
     }
 });
 

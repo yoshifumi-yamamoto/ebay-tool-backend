@@ -43,8 +43,6 @@ const fixedCostRoutes = require('./routes/fixedCostRoutes');
 const priorityQuadrantRoutes = require('./routes/priorityQuadrantRoutes');
 const inventoryCountRoutes = require('./routes/inventoryCountRoutes');
 
-// スケジューラのインポート
-const { scheduleInventoryUpdates } = require('./scheduler');
 const { CronJob } = require('cron');
 const { spawn } = require('child_process');
 
@@ -148,8 +146,6 @@ app.use('/api/inventory-counts', inventoryCountRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {
-  scheduleInventoryUpdates();
-
   const runCurl = (label, args) =>
     new Promise((resolve, reject) => {
       const curl = spawn('curl', ['-sS', '-o', '/dev/null', '-w', '%{http_code}', ...args], {
