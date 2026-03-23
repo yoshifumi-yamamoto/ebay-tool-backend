@@ -398,6 +398,386 @@ const normalizeIsoDate = (value, isEndDate = false) => {
     return parsed.toISOString();
 };
 
+const normalizeMarkdownPresetPayload = (input = {}) => {
+    const title = String(input.title || '').trim();
+    if (!title) {
+        throw new Error('title is required');
+    }
+
+    const discountPercent = toFiniteNumber(input.discountPercent);
+    if (discountPercent === null || discountPercent <= 0 || discountPercent >= 100) {
+        throw new Error('discountPercent must be between 0 and 100');
+    }
+
+    const categoryIds = Array.from(new Set(
+        (Array.isArray(input.categoryIds) ? input.categoryIds : [])
+            .map((id) => String(id || '').trim())
+            .filter(Boolean)
+    ));
+    const priceMin = toFiniteNumber(input.priceMin);
+    const priceMax = toFiniteNumber(input.priceMax);
+    if (priceMin !== null && priceMax !== null && priceMin > priceMax) {
+        throw new Error('priceMin must be less than or equal to priceMax');
+    }
+
+    return {
+        title,
+        discount_percent: discountPercent,
+        category_ids: categoryIds,
+        excluded_listing_ids: Array.from(new Set(
+            (Array.isArray(input.excludedListingIds) ? input.excludedListingIds : [])
+                .map((id) => String(id || '').trim())
+                .filter(Boolean)
+        )),
+        price_min: priceMin,
+        price_max: priceMax,
+        description: String(input.description || '').trim() || null,
+        is_active: input.isActive === undefined ? true : Boolean(input.isActive),
+    };
+};
+
+async function listMarkdownPresets(accountId) {
+    if (!accountId) {
+        throw new Error('accountId is required');
+    }
+
+    const { data, error } = await supabase
+        .from('markdown_presets')
+        .select('*')
+        .eq('account_id', accountId)
+        .order('updated_at', { ascending: false });
+
+    if (error) {
+        throw new Error(`Failed to fetch markdown presets: ${error.message}`);
+    }
+
+    return data || [];
+}
+
+async function createMarkdownPreset(payload) {
+    if (!payload?.accountId) {
+        throw new Error('accountId is required');
+    }
+    await getAccountAccess(payload.accountId);
+    const normalized = normalizeMarkdownPresetPayload(payload);
+    const { data, error } = await supabase
+        .from('markdown_presets')
+        .insert({
+            account_id: payload.accountId,
+            ...normalized,
+        })
+        .select('*')
+        .single();
+
+    if (error) {
+        throw new Error(`Failed to create markdown preset: ${error.message}`);
+    }
+
+    return data;
+}
+
+async function updateMarkdownPreset(presetId, payload) {
+    if (!presetId) {
+        throw new Error('presetId is required');
+    }
+
+    const { data: existing, error: existingError } = await supabase
+        .from('markdown_presets')
+        .select('*')
+        .eq('id', presetId)
+        .single();
+    if (existingError || !existing) {
+        throw new Error('Markdown preset not found');
+    }
+
+    await getAccountAccess(existing.account_id);
+    const normalized = normalizeMarkdownPresetPayload({
+        title: payload.title ?? existing.title,
+        discountPercent: payload.discountPercent ?? existing.discount_percent,
+        categoryIds: payload.categoryIds ?? existing.category_ids,
+        excludedListingIds: payload.excludedListingIds ?? existing.excluded_listing_ids,
+        priceMin: payload.priceMin ?? existing.price_min,
+        priceMax: payload.priceMax ?? existing.price_max,
+        description: payload.description ?? existing.description,
+        isActive: payload.isActive ?? existing.is_active,
+    });
+
+    const { data, error } = await supabase
+        .from('markdown_presets')
+        .update(normalized)
+        .eq('id', presetId)
+        .select('*')
+        .single();
+
+    if (error) {
+        throw new Error(`Failed to update markdown preset: ${error.message}`);
+    }
+
+    return data;
+}
+
+async function deleteMarkdownPreset(presetId) {
+    if (!presetId) {
+        throw new Error('presetId is required');
+    }
+    const { error } = await supabase
+        .from('markdown_presets')
+        .delete()
+        .eq('id', presetId);
+    if (error) {
+        throw new Error(`Failed to delete markdown preset: ${error.message}`);
+    }
+    return { success: true };
+}
+
+async function getMarkdownPresetsByIds(presetIds = []) {
+    const normalizedIds = Array.from(new Set(
+        (presetIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+    ));
+    if (normalizedIds.length === 0) {
+        throw new Error('presetIds is required');
+    }
+
+    const { data, error } = await supabase
+        .from('markdown_presets')
+        .select('*')
+        .in('id', normalizedIds);
+    if (error) {
+        throw new Error(`Failed to fetch markdown presets: ${error.message}`);
+    }
+    if (!data || data.length === 0) {
+        throw new Error('No markdown presets found');
+    }
+    return data;
+}
+
+async function resolveMarkdownListingsForPreset(preset) {
+    const { account } = await getAccountAccess(preset.account_id);
+    let query = supabase
+        .from('items')
+        .select('ebay_item_id, category_id, category_name, current_price_value, current_price_currency, item_title, primary_image_url')
+        .eq('user_id', account.user_id)
+        .eq('ebay_user_id', account.ebay_user_id)
+        .eq('listing_status', 'ACTIVE')
+        .not('ebay_item_id', 'is', null);
+
+    const categoryIds = Array.isArray(preset.category_ids)
+        ? preset.category_ids.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    if (categoryIds.length > 0) {
+        query = query.in('category_id', categoryIds);
+    }
+    if (preset.price_min !== null && preset.price_min !== undefined) {
+        query = query.gte('current_price_value', preset.price_min);
+    }
+    if (preset.price_max !== null && preset.price_max !== undefined) {
+        query = query.lte('current_price_value', preset.price_max);
+    }
+
+    const { data: listings, error } = await query.limit(2000);
+    if (error) {
+        throw new Error(`Failed to fetch listing candidates: ${error.message}`);
+    }
+
+    const excludedSet = new Set(
+        (Array.isArray(preset.excluded_listing_ids) ? preset.excluded_listing_ids : [])
+            .map((id) => String(id || '').trim())
+            .filter(Boolean)
+    );
+    const normalizedListings = (listings || [])
+        .map((row) => ({
+            listingId: String(row.ebay_item_id || '').trim(),
+            title: row.item_title || null,
+            categoryId: row.category_id || null,
+            categoryName: row.category_name || null,
+            currentPrice: row.current_price_value ?? null,
+            currency: row.current_price_currency || 'USD',
+            imageUrl: row.primary_image_url || null,
+            excluded: excludedSet.has(String(row.ebay_item_id || '').trim()),
+        }))
+        .filter((row) => row.listingId);
+    const listingIds = normalizedListings
+        .filter((row) => !row.excluded)
+        .map((row) => row.listingId);
+    return {
+        account,
+        listings: normalizedListings,
+        listingIds,
+        listingCount: listingIds.length,
+        totalCandidateCount: normalizedListings.length,
+        excludedCount: normalizedListings.filter((row) => row.excluded).length,
+    };
+}
+
+async function previewMarkdownPresets({ presetIds = [] }) {
+    let presets;
+    if (Array.isArray(presetIds) && presetIds.length > 0) {
+        presets = await getMarkdownPresetsByIds(presetIds);
+    } else {
+        presets = [{
+            account_id: arguments[0]?.accountId,
+            ...normalizeMarkdownPresetPayload({
+                title: arguments[0]?.title || 'Preview',
+                discountPercent: arguments[0]?.discountPercent,
+                categoryIds: arguments[0]?.categoryIds,
+                excludedListingIds: arguments[0]?.excludedListingIds,
+                priceMin: arguments[0]?.priceMin,
+                priceMax: arguments[0]?.priceMax,
+                description: arguments[0]?.description,
+                isActive: true,
+            }),
+            id: 'preview',
+        }];
+    }
+    const results = [];
+
+    for (const preset of presets) {
+        const { listingCount, totalCandidateCount, excludedCount, listings } = await resolveMarkdownListingsForPreset(preset);
+        results.push({
+            presetId: preset.id,
+            accountId: preset.account_id,
+            title: preset.title,
+            discountPercent: preset.discount_percent,
+            listingCount,
+            totalCandidateCount,
+            excludedCount,
+            isActive: preset.is_active,
+            listings,
+        });
+    }
+
+    return {
+        results,
+        totalListingCount: results.reduce((sum, row) => sum + (row.listingCount || 0), 0),
+    };
+}
+
+async function createMarkdownSaleEventFromPreset({
+    preset,
+    startDate,
+    endDate,
+}) {
+    const normalizedStart = normalizeIsoDate(startDate, false);
+    const normalizedEnd = normalizeIsoDate(endDate, true);
+    if (!normalizedStart || !normalizedEnd) {
+        throw new Error('startDate and endDate are required (YYYY-MM-DD)');
+    }
+
+    const { accessToken, marketplaceId } = await getAccountAccess(preset.account_id);
+    const { listingIds, totalCandidateCount, excludedCount } = await resolveMarkdownListingsForPreset(preset);
+    if (listingIds.length === 0) {
+        throw new Error('No active listings match filters');
+    }
+
+    const payload = {
+        name: `${preset.title} ${String(startDate).trim()}`,
+        description: String(preset.description || `Markdown ${preset.discount_percent}%`),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        marketplaceId,
+        promotionStatus: 'SCHEDULED',
+        selectedInventoryDiscounts: [{
+            inventoryCriterion: {
+                inventoryCriterionType: 'INVENTORY_BY_VALUE',
+                listingIds,
+            },
+            discountBenefit: {
+                percentageOffItem: String(preset.discount_percent),
+            },
+        }],
+    };
+
+    const response = await axios.post(`${EBAY_MARKETING_API_BASE}/item_price_markdown`, payload, {
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+        },
+    });
+    const location = response?.headers?.location || null;
+    const promotionId = location ? String(location).split('/').pop() : null;
+
+    return {
+        promotionId,
+        location,
+        listingCount: listingIds.length,
+        totalCandidateCount,
+        excludedCount,
+        marketplaceId,
+        payload,
+        responseData: response?.data || null,
+    };
+}
+
+async function recordMarkdownRun(run) {
+    const { error } = await supabase
+        .from('markdown_runs')
+        .insert(run);
+    if (error) {
+        console.warn('[marketing] failed to insert markdown run', { message: error.message });
+    }
+}
+
+async function executeMarkdownPresets({ presetIds = [], startDate, endDate }) {
+    const presets = await getMarkdownPresetsByIds(presetIds);
+    const results = [];
+
+    for (const preset of presets) {
+        try {
+            const result = await createMarkdownSaleEventFromPreset({ preset, startDate, endDate });
+            await recordMarkdownRun({
+                preset_id: preset.id,
+                account_id: preset.account_id,
+                status: 'success',
+                promotion_id: result.promotionId,
+                listing_count: result.listingCount,
+                request_payload: result.payload,
+                response_payload: {
+                    location: result.location,
+                    data: result.responseData,
+                },
+                error_message: null,
+            });
+            results.push({
+                presetId: preset.id,
+                accountId: preset.account_id,
+                title: preset.title,
+                status: 'success',
+                promotionId: result.promotionId,
+                listingCount: result.listingCount,
+                totalCandidateCount: result.totalCandidateCount,
+                excludedCount: result.excludedCount,
+            });
+        } catch (error) {
+            await recordMarkdownRun({
+                preset_id: preset.id,
+                account_id: preset.account_id,
+                status: 'failed',
+                promotion_id: null,
+                listing_count: 0,
+                request_payload: {
+                    startDate,
+                    endDate,
+                },
+                response_payload: error.responseData || null,
+                error_message: error.message || 'Failed to execute markdown preset',
+            });
+            results.push({
+                presetId: preset.id,
+                accountId: preset.account_id,
+                title: preset.title,
+                status: 'failed',
+                error: error.message || 'Failed to execute markdown preset',
+            });
+        }
+    }
+
+    return {
+        results,
+        successCount: results.filter((row) => row.status === 'success').length,
+        failureCount: results.filter((row) => row.status === 'failed').length,
+    };
+}
+
 async function fetchEligibleItemsAll({ accessToken, marketplaceId, maxItems = 1000 }) {
     const items = [];
     let offset = 0;
@@ -689,76 +1069,39 @@ async function createMarkdownSaleEvent({
     name = '',
     description = '',
 }) {
-    const normalizedPercent = toFiniteNumber(discountPercent);
-    if (normalizedPercent === null || normalizedPercent <= 0 || normalizedPercent >= 100) {
-        throw new Error('discountPercent must be between 0 and 100');
-    }
-    const normalizedStart = normalizeIsoDate(startDate, false);
-    const normalizedEnd = normalizeIsoDate(endDate, true);
-    if (!normalizedStart || !normalizedEnd) {
-        throw new Error('startDate and endDate are required (YYYY-MM-DD)');
-    }
-
-    const { account, accessToken, marketplaceId } = await getAccountAccess(accountId);
-    let query = supabase
-        .from('items')
-        .select('ebay_item_id, category_id, current_price_value')
-        .eq('user_id', account.user_id)
-        .eq('ebay_user_id', account.ebay_user_id)
-        .eq('listing_status', 'ACTIVE')
-        .not('ebay_item_id', 'is', null);
-
-    const categoryList = (categoryIds || []).map((id) => String(id).trim()).filter(Boolean);
-    if (categoryList.length > 0) {
-        query = query.in('category_id', categoryList);
-    }
-
-    const min = toFiniteNumber(minPrice);
-    const max = toFiniteNumber(maxPrice);
-    if (min !== null) query = query.gte('current_price_value', min);
-    if (max !== null) query = query.lte('current_price_value', max);
-
-    const { data: listings, error: listingError } = await query.limit(2000);
-    if (listingError) {
-        throw new Error(`Failed to fetch listing candidates: ${listingError.message}`);
-    }
-    const listingIds = (listings || []).map((row) => String(row.ebay_item_id || '')).filter(Boolean);
-    if (listingIds.length === 0) {
-        throw new Error('No active listings match filters');
-    }
-
-    const payload = {
-        name: String(name || `Markdown ${new Date().toISOString().slice(0, 10)}`),
-        description: String(description || `Markdown ${normalizedPercent}%`),
-        startDate: normalizedStart,
-        endDate: normalizedEnd,
-        marketplaceId,
-        promotionStatus: 'SCHEDULED',
-        selectedInventoryDiscounts: [{
-            inventoryCriterion: {
-                inventoryCriterionType: 'INVENTORY_BY_VALUE',
-                listingIds,
-            },
-            discountBenefit: {
-                percentageOffItem: String(normalizedPercent),
-            },
-        }],
+    const preset = {
+        account_id: accountId,
+        title: String(name || `Markdown ${new Date().toISOString().slice(0, 10)}`),
+        discount_percent: discountPercent,
+        category_ids: categoryIds,
+        excluded_listing_ids: [],
+        price_min: minPrice,
+        price_max: maxPrice,
+        description,
     };
-
-    const response = await axios.post(`${EBAY_MARKETING_API_BASE}/item_price_markdown`, payload, {
-        headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-        },
+    const normalizedPreset = normalizeMarkdownPresetPayload({
+        title: preset.title,
+        discountPercent: preset.discount_percent,
+        categoryIds: preset.category_ids,
+        excludedListingIds: preset.excluded_listing_ids,
+        priceMin: preset.price_min,
+        priceMax: preset.price_max,
+        description: preset.description,
+        isActive: true,
     });
-    const location = response?.headers?.location || null;
-    const promotionId = location ? String(location).split('/').pop() : null;
-
+    const result = await createMarkdownSaleEventFromPreset({
+        preset: {
+            ...preset,
+            ...normalizedPreset,
+        },
+        startDate,
+        endDate,
+    });
     return {
-        promotionId,
-        location,
-        listingCount: listingIds.length,
-        marketplaceId,
+        promotionId: result.promotionId,
+        location: result.location,
+        listingCount: result.listingCount,
+        marketplaceId: result.marketplaceId,
     };
 }
 
@@ -844,6 +1187,12 @@ module.exports = {
     getSendOfferEligibleItems,
     sendOfferToInterestedBuyers,
     getMarkdownCategoryCandidates,
+    listMarkdownPresets,
+    createMarkdownPreset,
+    updateMarkdownPreset,
+    deleteMarkdownPreset,
+    previewMarkdownPresets,
+    executeMarkdownPresets,
     createMarkdownSaleEvent,
     bulkApplyPromotedListings,
 };

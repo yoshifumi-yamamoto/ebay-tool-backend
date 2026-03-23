@@ -1500,6 +1500,11 @@ async function backfillRecentShippedOrdersMissingTracking({
     limit = Number.parseInt(process.env.SHIPCO_TRACKING_BACKFILL_LIMIT || '200', 10) || 200,
 }) {
     const cutoff = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+    const targetFilter = [
+        'shipco_synced_at.is.null',
+        `shipment_recorded_at.gte.${cutoff}`,
+        `and(shipment_recorded_at.is.null,created_at.gte.${cutoff})`,
+    ].join(',');
 
     const { data: targets, error: targetError } = await supabase
         .from('orders')
@@ -1507,7 +1512,7 @@ async function backfillRecentShippedOrdersMissingTracking({
         .eq('user_id', userId)
         .eq('shipping_status', 'SHIPPED')
         .is('shipping_tracking_number', null)
-        .or(`shipment_recorded_at.gte.${cutoff},and(shipment_recorded_at.is.null,created_at.gte.${cutoff})`)
+        .or(targetFilter)
         .order('shipment_recorded_at', { ascending: true, nullsFirst: true })
         .order('created_at', { ascending: true })
         .limit(limit);
@@ -1625,22 +1630,50 @@ async function fetchRelevantOrders(userId) {
 }
 
 async function fetchShippedOrders(userId) {
-    const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('shipping_status', 'SHIPPED')
-        .not('status', 'in', '("FULLY_REFUNDED","CANCELED")')
-        .order('order_date', { ascending: false })
-        .limit(5000);
+    const pageSize = 500;
+    const maxOrders = 5000;
+    const excludedStatuses = new Set(['FULLY_REFUNDED', 'CANCELED']);
+    const orders = [];
+    let from = 0;
 
-    if (error) {
-        console.error('Error fetching shipped orders:', error.message);
-        return [];
+    while (orders.length < maxOrders) {
+        const to = from + pageSize - 1;
+        const { data, error } = await supabase
+            .from('orders')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('shipping_status', 'SHIPPED')
+            .order('order_date', { ascending: false })
+            .range(from, to);
+
+        if (error) {
+            console.error('Error fetching shipped orders:', error.message);
+            return [];
+        }
+
+        const rows = Array.isArray(data) ? data : [];
+        if (rows.length === 0) {
+            break;
+        }
+
+        for (const row of rows) {
+            if (excludedStatuses.has(row?.status)) {
+                continue;
+            }
+            orders.push(row);
+            if (orders.length >= maxOrders) {
+                break;
+            }
+        }
+
+        if (rows.length < pageSize) {
+            break;
+        }
+
+        from += pageSize;
     }
 
     const exchangeRates = await loadUserExchangeRates(userId);
-    const orders = data || [];
     const orderNos = orders.map((order) => order.order_no).filter(Boolean);
     const lineItemsByOrderNo = {};
     let groupLabelMap = {};
