@@ -61,6 +61,29 @@ function mapSiteCodeToMarketplaceId(siteCode) {
     return siteToMarketplace[normalized] || null;
 }
 
+function mapViewItemUrlToMarketplaceId(viewItemUrl) {
+    if (!viewItemUrl) return null;
+
+    try {
+        const hostname = new URL(viewItemUrl).hostname.toLowerCase();
+        if (hostname === 'www.ebay.com' || hostname.endsWith('.ebay.com')) return 'EBAY_US';
+        if (hostname === 'www.ebay.co.uk' || hostname.endsWith('.ebay.co.uk')) return 'EBAY_GB';
+        if (hostname === 'www.ebay.de' || hostname.endsWith('.ebay.de')) return 'EBAY_DE';
+        if (hostname === 'www.ebay.com.au' || hostname.endsWith('.ebay.com.au')) return 'EBAY_AU';
+        if (hostname === 'www.ebay.ca' || hostname.endsWith('.ebay.ca')) return 'EBAY_CA';
+        if (hostname === 'www.cafr.ebay.ca' || hostname.endsWith('.cafr.ebay.ca')) return 'EBAY_CA';
+        if (hostname === 'www.befr.ebay.be' || hostname.endsWith('.befr.ebay.be')) return 'EBAY_BE';
+        if (hostname === 'www.benl.ebay.be' || hostname.endsWith('.benl.ebay.be')) return 'EBAY_BE';
+        if (hostname === 'www.ebay.fr' || hostname.endsWith('.ebay.fr')) return 'EBAY_FR';
+        if (hostname === 'www.ebay.it' || hostname.endsWith('.ebay.it')) return 'EBAY_IT';
+        if (hostname === 'www.ebay.es' || hostname.endsWith('.ebay.es')) return 'EBAY_ES';
+    } catch (error) {
+        return null;
+    }
+
+    return null;
+}
+
 function formatForEbayAPI(octoparseData, matchingItems) {
     return octoparseData.map((data) => {
         const quantity = isSoldOut(data["在庫"]) ? 0 : parseInt(data["在庫"], 10) || 1; // 数量が空の場合に1をデフォルト設定
@@ -289,13 +312,15 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
             const primaryImage = Array.isArray(item.PictureDetails?.PictureURL)
                 ? item.PictureDetails.PictureURL[0]
                 : item.PictureDetails?.PictureURL;
+            const viewItemUrl = getTextValue(item?.ListingDetails?.ViewItemURL) || getTextValue(item?.ListingDetails?.ViewItemURLForNaturalSearch);
+            const siteCode = getTextValue(item?.Site);
             return {
                 legacyItemId: getTextValue(item.ItemID),
                 sku: getTextValue(item?.SKU),
                 // GetMyeBaySelling.ActiveList only returns active listings and does not include ListingStatus.
                 status: 'ACTIVE',
-                site_code: getTextValue(item?.Site),
-                marketplace_id: mapSiteCodeToMarketplaceId(getTextValue(item?.Site)),
+                site_code: siteCode,
+                marketplace_id: mapViewItemUrlToMarketplaceId(viewItemUrl) || mapSiteCodeToMarketplaceId(siteCode),
                 category_id: getTextValue(item?.PrimaryCategory?.CategoryID),
                 category_name: getTextValue(item?.PrimaryCategory?.CategoryName),
                 category_path: null,
@@ -303,7 +328,7 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                 current_price_value: getTextValue(currentPrice),
                 current_price_currency: currentPrice?.$?.currencyID || null,
                 primary_image_url: primaryImage || null,
-                view_item_url: getTextValue(item?.ListingDetails?.ViewItemURL) || getTextValue(item?.ListingDetails?.ViewItemURLForNaturalSearch),
+                view_item_url: viewItemUrl,
             };
         });
 
