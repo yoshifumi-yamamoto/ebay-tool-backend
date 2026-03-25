@@ -200,6 +200,12 @@ if (process.env.ENABLE_SCHEDULER === 'true') {
 
   runChatworkApiJob.start();
 
+  const runProcurementAlertJob = new CronJob('0 7 * * *', () => {
+    runCurl('chatwork procurement alerts', ['-X', 'GET', `${baseUrl}/api/chatwork/procurement-alerts/2`]).catch(() => {});
+  }, null, true, 'Asia/Tokyo');
+
+  runProcurementAlertJob.start();
+
   // スプレッドシートのデータを同期する
   const runSyncSheetJob = new CronJob('0 6,12,18 * * *', () => {
     console.log('Starting sync-sheet API call...');

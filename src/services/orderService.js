@@ -2199,6 +2199,93 @@ async function fetchLastWeekOrders(userId) {
     return enrichedOrders;
 }
 
+async function getProcurementAlertCandidates(userId) {
+    const now = new Date();
+    const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
+    const recentOrderThreshold = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000)).toISOString();
+    const newOrMissingThreshold = new Date(now.getTime() - threeDaysMs).toISOString();
+    const orderedThreshold = new Date(now.getTime() - threeDaysMs).toISOString();
+    const shippingDeadlineThreshold = new Date(now.getTime() + threeDaysMs).toISOString();
+    const excludedOrderStatuses = ['CANCELLED', 'CANCELED', 'CANCEL_REQUESTED', 'FAILED', 'REFUNDED'];
+
+    const { data: orders, error } = await supabase
+        .from('orders')
+        .select('order_no, order_date, shipping_deadline, ebay_user_id, shipping_status, status, order_line_items(*)')
+        .eq('user_id', userId)
+        .gte('order_date', recentOrderThreshold)
+        .not('shipping_status', 'eq', 'SHIPPED')
+        .not('status', 'in', `(${excludedOrderStatuses.map((status) => `"${status}"`).join(',')})`)
+        .order('shipping_deadline', { ascending: true, nullsFirst: false })
+        .order('created_at', { ascending: true, foreignTable: 'order_line_items' });
+
+    if (error) {
+        throw new Error(`Failed to fetch procurement alerts: ${error.message}`);
+    }
+
+    const normalizedOrders = (orders || []).map(attachNormalizedLineItemsToOrder);
+
+    const alerts = normalizedOrders
+        .map((order) => {
+            const orderDateTs = order.order_date ? new Date(order.order_date).getTime() : null;
+            const shippingDeadlineTs = order.shipping_deadline ? new Date(order.shipping_deadline).getTime() : null;
+
+            const lineItems = (order.line_items || [])
+                .map((item) => {
+                    const status = normalizeProcurementStatusValue(item.procurement_status) || 'NEW';
+                    const orderedAtSource = item.procurement_ordered_at || item.updated_at || null;
+                    const orderedAtTs = orderedAtSource ? new Date(orderedAtSource).getTime() : null;
+
+                    if ((status === 'NEW' || status === 'OUTOFSTOCK') && orderDateTs && orderDateTs <= new Date(newOrMissingThreshold).getTime()) {
+                        return {
+                            id: item.id,
+                            title: item.title,
+                            currentStatus: status,
+                            currentStatusLabel: status === 'NEW' ? '新' : '欠',
+                            reason: '注文日から3日経過しても仕入れステータスが変わっていません',
+                        };
+                    }
+
+                    if (status === 'ORDERED' && orderedAtTs && orderedAtTs <= new Date(orderedThreshold).getTime()) {
+                        return {
+                            id: item.id,
+                            title: item.title,
+                            currentStatus: status,
+                            currentStatusLabel: '注',
+                            reason: '注になってから3日経過しても配になっていません',
+                        };
+                    }
+
+                    if (status === 'STOCKED_SHIPPED' && shippingDeadlineTs && shippingDeadlineTs <= new Date(shippingDeadlineThreshold).getTime()) {
+                        return {
+                            id: item.id,
+                            title: item.title,
+                            currentStatus: status,
+                            currentStatusLabel: '配',
+                            reason: '発送期限の3日前時点で受になっていません',
+                        };
+                    }
+
+                    return null;
+                })
+                .filter(Boolean);
+
+            if (!lineItems.length) {
+                return null;
+            }
+
+            return {
+                orderNo: order.order_no,
+                orderDate: order.order_date,
+                shippingDeadline: order.shipping_deadline,
+                ebayUserId: order.ebay_user_id,
+                lineItems,
+            };
+        })
+        .filter(Boolean);
+
+    return alerts;
+}
+
 module.exports = {
     fetchOrdersFromEbay,
     saveOrdersAndBuyers,
@@ -2210,6 +2297,7 @@ module.exports = {
     fetchArchivedSummary,
     updateOrder,
     fetchLastWeekOrders,
+    getProcurementAlertCandidates,
     updateProcurementStatus,
     updateProcurementTrackingNumber,
     markOrdersAsShipped,

@@ -12,6 +12,9 @@ async function fetchItemsByLegacyItemIds(legacyItemIds) {
 }
 
 function sendChatworkMessage(token, roomId, messageBody) {
+    if (!token || !roomId || !messageBody) {
+        throw new Error('Chatwork token, roomId, and messageBody are required');
+    }
     const endpoint = `https://api.chatwork.com/v2/rooms/${roomId}/messages`;
     const options = {
         method: "post",
@@ -63,7 +66,51 @@ async function createWeeklySalesMessage(userId, token, roomId) {
     await sendChatworkMessage(token, roomId, messageBody);
 }
 
+const formatDateLabel = (value) => {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '-';
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+};
+
+async function sendProcurementAlertSummary(userId, token, roomId) {
+    const alerts = await orderService.getProcurementAlertCandidates(userId);
+    if (!alerts.length) {
+        return { sent: false, alertCount: 0 };
+    }
+
+    const header = '[toall]\n仕入れアラートを共有します。\n発送期限までの仕入れ遅延リスクがある注文です。\n\n';
+    const maxBodyLength = 9000;
+    const lines = [];
+    let omittedCount = 0;
+
+    alerts.forEach((alert) => {
+        const itemSummary = (alert.lineItems || [])
+            .map((item) => item.currentStatusLabel)
+            .filter(Boolean)
+            .join(',');
+        const line = `・${alert.orderNo} | ${alert.ebayUserId || '-'} | 期限:${formatDateLabel(alert.shippingDeadline)} | 状態:${itemSummary || '-'}\n`;
+        if ((header.length + lines.join('').length + line.length) <= maxBodyLength) {
+            lines.push(line);
+        } else {
+            omittedCount += 1;
+        }
+    });
+
+    let messageBody = header + lines.join('');
+    if (omittedCount > 0) {
+        messageBody += `\nほか ${omittedCount} 件あります。詳細はBayworkで確認してください。`;
+    }
+
+    await sendChatworkMessage(token, roomId, messageBody.trim());
+    return { sent: true, alertCount: alerts.length };
+}
+
 module.exports = {
     createWeeklySalesMessage,
-    sendChatworkMessage
+    sendChatworkMessage,
+    sendProcurementAlertSummary,
 };

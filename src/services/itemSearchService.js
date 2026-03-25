@@ -1,6 +1,9 @@
 const supabase = require('../supabaseClient');
 const dayjs = require('dayjs');
 const { attachNormalizedLineItemsToOrder } = require('./orderService');
+const { getRefreshTokenByEbayUserId, refreshEbayToken } = require('./accountService');
+const { fetchItemDetails } = require('./itemService');
+const axios = require('axios');
 require('dotenv').config();
 
 // 仮の為替レート
@@ -307,4 +310,154 @@ async function searchItemsSimple(queryParams) {
   return { items: data || [] };
 }
 
-module.exports = { searchItems, getOrdersForMonth, searchItemsSimple };
+const normalizeSearchText = (value) => String(value || '')
+  .toLowerCase()
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const titleToLikePattern = (value) => normalizeSearchText(value).replace(/\s+/g, '%');
+const countSearchTerms = (value) => normalizeSearchText(value).split(' ').filter(Boolean).length;
+
+async function fetchInventoryItemBySku(ebayUserId, sku) {
+  const refreshToken = await getRefreshTokenByEbayUserId(ebayUserId);
+  const accessToken = await refreshEbayToken(refreshToken);
+  const response = await axios.get(
+    `https://api.ebay.com/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+  return response.data || null;
+}
+
+async function resolveLookupSeeds({ user_id, account, title, sku, itemId }) {
+  const seeds = [];
+  const pushSeed = (seedTitle, source, sourceValue) => {
+    const normalized = normalizeSearchText(seedTitle);
+    if (!normalized) return;
+    if (seeds.some((seed) => seed.normalizedTitle === normalized)) return;
+    seeds.push({
+      title: String(seedTitle).trim(),
+      normalizedTitle: normalized,
+      source,
+      sourceValue,
+    });
+  };
+
+  if (title) {
+    pushSeed(title, 'title', title);
+  }
+
+  if (itemId) {
+    const { data: localItem } = await supabase
+      .from('items')
+      .select('item_title')
+      .eq('user_id', user_id)
+      .eq('ebay_user_id', account)
+      .eq('ebay_item_id', itemId)
+      .maybeSingle();
+
+    if (localItem?.item_title) {
+      pushSeed(localItem.item_title, 'itemId_local', itemId);
+    } else {
+      const refreshToken = await getRefreshTokenByEbayUserId(account);
+      const accessToken = await refreshEbayToken(refreshToken);
+      const item = await fetchItemDetails(itemId, accessToken);
+      if (item?.Title) {
+        pushSeed(item.Title, 'itemId_ebay', itemId);
+      }
+    }
+  }
+
+  if (sku) {
+    const { data: localSkuItem } = await supabase
+      .from('items')
+      .select('item_title')
+      .eq('user_id', user_id)
+      .eq('ebay_user_id', account)
+      .ilike('sku', sku)
+      .maybeSingle();
+
+    if (localSkuItem?.item_title) {
+      pushSeed(localSkuItem.item_title, 'sku_local', sku);
+    } else {
+      const inventoryItem = await fetchInventoryItemBySku(account, sku);
+      if (inventoryItem?.product?.title) {
+        pushSeed(inventoryItem.product.title, 'sku_ebay', sku);
+      }
+    }
+  }
+
+  return seeds;
+}
+
+async function searchSupplierCandidates(queryParams) {
+  const { user_id, account, title, sku, itemId, limit = 50 } = queryParams;
+
+  if (!user_id) {
+    throw new Error('user_id is required');
+  }
+  if (!account) {
+    throw new Error('account is required');
+  }
+  if (!title && !sku && !itemId) {
+    throw new Error('title, sku, or itemId is required');
+  }
+  if (title && !sku && !itemId) {
+    const normalizedTitle = normalizeSearchText(title);
+    if (normalizedTitle.length < 12 || countSearchTerms(normalizedTitle) < 3) {
+      throw new Error('検索条件が広すぎます。キーワードを足してください。');
+    }
+  }
+
+  const numericLimit = Number.isFinite(Number(limit)) ? Number(limit) : 50;
+  const seeds = await resolveLookupSeeds({ user_id, account, title, sku, itemId });
+
+  if (!seeds.length) {
+    return { seeds: [], candidates: [] };
+  }
+
+  const candidateMap = new Map();
+
+  for (const seed of seeds) {
+    const pattern = titleToLikePattern(seed.title);
+    if (!pattern) continue;
+
+    const { data, error } = await supabase
+      .from('items')
+      .select('ebay_item_id, ebay_user_id, sku, item_title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency, primary_image_url, updated_at')
+      .eq('user_id', user_id)
+      .not('stocking_url', 'is', null)
+      .ilike('item_title', `%${pattern}%`)
+      .order('updated_at', { ascending: false })
+      .limit(numericLimit);
+
+    if (error) {
+      if (String(error.message || '').includes('statement timeout')) {
+        throw new Error('検索条件が広すぎます。キーワードを足してください。');
+      }
+      throw new Error(`Error fetching supplier candidates: ${error.message}`);
+    }
+
+    (data || []).forEach((item) => {
+      const key = `${item.ebay_user_id || ''}:${item.ebay_item_id || ''}`;
+      if (candidateMap.has(key)) return;
+      candidateMap.set(key, {
+        ...item,
+        matched_title: seed.title,
+        match_source: seed.source,
+        supplier_url: item.stocking_url || null,
+      });
+    });
+  }
+
+  return {
+    seeds,
+    candidates: Array.from(candidateMap.values()).slice(0, numericLimit),
+  };
+}
+
+module.exports = { searchItems, getOrdersForMonth, searchItemsSimple, searchSupplierCandidates };
