@@ -88,11 +88,14 @@ async function sendProcurementAlertSummary(userId, token, roomId) {
     let omittedCount = 0;
 
     alerts.forEach((alert) => {
-        const itemSummary = (alert.lineItems || [])
+        const reasonText = (alert.lineItems || [])
+            .map((item) => item.reason)
+            .filter(Boolean)[0] || '-';
+        const statuses = (alert.lineItems || [])
             .map((item) => item.currentStatusLabel)
             .filter(Boolean)
             .join(',');
-        const line = `・${alert.orderNo} | ${alert.ebayUserId || '-'} | 期限:${formatDateLabel(alert.shippingDeadline)} | 状態:${itemSummary || '-'}\n`;
+        const line = `・注文番号:${alert.orderNo} / アカウント:${alert.ebayUserId || '-'} / 状態:${statuses || '-'} / ${reasonText}\n`;
         if ((header.length + lines.join('').length + line.length) <= maxBodyLength) {
             lines.push(line);
         } else {

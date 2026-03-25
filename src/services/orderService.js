@@ -2241,7 +2241,9 @@ async function getProcurementAlertCandidates(userId) {
                             title: item.title,
                             currentStatus: status,
                             currentStatusLabel: status === 'NEW' ? '新' : '欠',
-                            reason: '注文日から3日経過しても仕入れステータスが変わっていません',
+                            reason: status === 'NEW'
+                                ? '注文から３日経過しています。仕入れを行ってください。'
+                                : '注文から３日経過しています。在庫状況を確認してください。',
                         };
                     }
 
@@ -2251,7 +2253,7 @@ async function getProcurementAlertCandidates(userId) {
                             title: item.title,
                             currentStatus: status,
                             currentStatusLabel: '注',
-                            reason: '注になってから3日経過しても配になっていません',
+                            reason: '発注から３日経過しています。発送状況を確認してください。',
                         };
                     }
 
@@ -2261,7 +2263,7 @@ async function getProcurementAlertCandidates(userId) {
                             title: item.title,
                             currentStatus: status,
                             currentStatusLabel: '配',
-                            reason: '発送期限の3日前時点で受になっていません',
+                            reason: '発送期限が迫っています。配送状況を確認してください。',
                         };
                     }
 
