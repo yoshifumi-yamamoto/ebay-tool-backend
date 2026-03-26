@@ -3,7 +3,9 @@ const dayjs = require('dayjs');
 const { attachNormalizedLineItemsToOrder } = require('./orderService');
 const { getRefreshTokenByEbayUserId, refreshEbayToken } = require('./accountService');
 const { fetchItemDetails } = require('./itemService');
+const { fetchActiveListings } = require('./itemService');
 const axios = require('axios');
+const xml2js = require('xml2js');
 require('dotenv').config();
 
 // 仮の為替レート
@@ -317,6 +319,178 @@ const normalizeSearchText = (value) => String(value || '')
 
 const titleToLikePattern = (value) => normalizeSearchText(value).replace(/\s+/g, '%');
 const countSearchTerms = (value) => normalizeSearchText(value).split(' ').filter(Boolean).length;
+const COMMON_SEARCH_TOKENS = new Set(['the', 'and', 'for', 'with', 'from', 'auto', 'scale']);
+
+const extractSearchTokens = (value) => {
+  const normalized = normalizeSearchText(value);
+  const rawTokens = normalized
+    .split(' ')
+    .map((token) => token.replace(/[^\p{L}\p{N}\-]/gu, ''))
+    .filter(Boolean);
+
+  const uniqueTokens = [];
+  rawTokens.forEach((token) => {
+    if (token.length < 3) return;
+    if (COMMON_SEARCH_TOKENS.has(token)) return;
+    if (uniqueTokens.includes(token)) return;
+    uniqueTokens.push(token);
+  });
+  return uniqueTokens.slice(0, 5);
+};
+
+const applyTokenFilters = (query, column, tokens) => {
+  let nextQuery = query;
+  tokens.forEach((token) => {
+    nextQuery = nextQuery.ilike(column, `%${token}%`);
+  });
+  return nextQuery;
+};
+
+const looksLikeUrl = (value) => /^https?:\/\//i.test(String(value || '').trim());
+
+const titleMatchesTokens = (title, tokens) => {
+  const normalized = normalizeSearchText(title);
+  return tokens.every((token) => normalized.includes(token));
+};
+
+async function fetchEbayListingSeeds(account, seedTitle, maxPages = 30) {
+  const refreshToken = await getRefreshTokenByEbayUserId(account);
+  const accessToken = await refreshEbayToken(refreshToken);
+  const tokens = extractSearchTokens(seedTitle);
+  if (tokens.length < 2) {
+    return [];
+  }
+
+  const matches = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const { listings = [], hasMoreItems = false } = await fetchActiveListings(accessToken, page, 100);
+    const filtered = listings.filter((listing) => titleMatchesTokens(listing.item_title, tokens));
+    matches.push(...filtered);
+    if (matches.length >= 50) {
+      break;
+    }
+    if (!hasMoreItems) {
+      break;
+    }
+  }
+
+  const deduped = new Map();
+  matches.forEach((listing) => {
+    const key = listing.legacyItemId || listing.item_title;
+    if (!key || deduped.has(key)) return;
+    deduped.set(key, listing);
+  });
+  return Array.from(deduped.values()).slice(0, 50);
+}
+
+async function fetchSellerListingsByTitle(account, seedTitle, maxPages = 20) {
+  const refreshToken = await getRefreshTokenByEbayUserId(account);
+  const accessToken = await refreshEbayToken(refreshToken);
+  const tokens = extractSearchTokens(seedTitle);
+  if (tokens.length < 2) {
+    return [];
+  }
+
+  const startTimeFrom = new Date('2018-01-01T00:00:00.000Z').toISOString();
+  const endTimeTo = new Date().toISOString();
+  const parser = new xml2js.Parser({ explicitArray: false });
+  const matches = [];
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const requestBody = `<?xml version="1.0" encoding="utf-8"?>
+<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>${accessToken}</eBayAuthToken>
+  </RequesterCredentials>
+  <StartTimeFrom>${startTimeFrom}</StartTimeFrom>
+  <StartTimeTo>${endTimeTo}</StartTimeTo>
+  <Pagination>
+    <EntriesPerPage>100</EntriesPerPage>
+    <PageNumber>${page}</PageNumber>
+  </Pagination>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetSellerListRequest>`;
+
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', requestBody, {
+      headers: {
+        'Content-Type': 'text/xml',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+        'X-EBAY-API-DEV-NAME': process.env.EBAY_DEV_ID,
+        'X-EBAY-API-APP-NAME': process.env.EBAY_APP_ID,
+        'X-EBAY-API-CERT-NAME': process.env.EBAY_CERT_ID,
+        'X-EBAY-API-CALL-NAME': 'GetSellerList',
+        'X-EBAY-API-SITEID': '0',
+      },
+    });
+
+    const result = await parser.parseStringPromise(response.data);
+    const responseRoot = result?.GetSellerListResponse || {};
+    const itemRoot = responseRoot?.ItemArray?.Item || [];
+    const items = Array.isArray(itemRoot) ? itemRoot : (itemRoot ? [itemRoot] : []);
+    const totalEntries = Number.parseInt(responseRoot?.PaginationResult?.TotalNumberOfEntries || '0', 10) || 0;
+
+    items.forEach((item) => {
+      const title = item?.Title || null;
+      if (!titleMatchesTokens(title, tokens)) return;
+      matches.push({
+        legacyItemId: item?.ItemID || null,
+        item_title: title,
+        sku: item?.SKU || null,
+        primary_image_url: Array.isArray(item?.PictureDetails?.PictureURL)
+          ? item.PictureDetails.PictureURL[0]
+          : item?.PictureDetails?.PictureURL || null,
+        view_item_url: item?.ListingDetails?.ViewItemURL || item?.ListingDetails?.ViewItemURLForNaturalSearch || null,
+      });
+    });
+
+    if (matches.length >= 50) {
+      break;
+    }
+    if ((page * 100) >= totalEntries) {
+      break;
+    }
+  }
+
+  const deduped = new Map();
+  matches.forEach((listing) => {
+    const key = listing.legacyItemId || listing.item_title;
+    if (!key || deduped.has(key)) return;
+    deduped.set(key, listing);
+  });
+  return Array.from(deduped.values()).slice(0, 50);
+}
+
+async function fetchDirectEbayItemCandidate(account, itemId) {
+  if (!account || !itemId) {
+    return null;
+  }
+  const refreshToken = await getRefreshTokenByEbayUserId(account);
+  const accessToken = await refreshEbayToken(refreshToken);
+  const item = await fetchItemDetails(itemId, accessToken);
+  if (!item) {
+    return null;
+  }
+
+  const rawPictures = item?.PictureDetails?.PictureURL;
+  const primaryImage = Array.isArray(rawPictures) ? rawPictures[0] : rawPictures || null;
+  const sku = item?.SKU || null;
+
+  return {
+    ebay_item_id: itemId,
+    ebay_user_id: account,
+    sku,
+    item_title: item?.Title || null,
+    stocking_url: null,
+    cost_price: null,
+    estimated_shipping_cost: null,
+    current_price_value: null,
+    current_price_currency: null,
+    primary_image_url: primaryImage,
+    updated_at: null,
+    supplier_url: looksLikeUrl(sku) ? sku : null,
+    view_item_url: item?.ListingDetails?.ViewItemURL || item?.ListingDetails?.ViewItemURLForNaturalSearch || null,
+  };
+}
 
 async function fetchInventoryItemBySku(ebayUserId, sku) {
   const refreshToken = await getRefreshTokenByEbayUserId(ebayUserId);
@@ -415,16 +589,38 @@ async function searchSupplierCandidates(queryParams) {
 
   const numericLimit = Number.isFinite(Number(limit)) ? Number(limit) : 50;
   const seeds = await resolveLookupSeeds({ user_id, account, title, sku, itemId });
+  const directEbayCandidate = itemId ? await fetchDirectEbayItemCandidate(account, itemId) : null;
 
   if (!seeds.length) {
     return { seeds: [], candidates: [] };
   }
 
+  if (directEbayCandidate && directEbayCandidate.supplier_url) {
+    return {
+      seeds,
+      candidates: [{
+        ...directEbayCandidate,
+        matched_title: directEbayCandidate.item_title || itemId,
+        match_source: 'itemId_direct_ebay',
+      }],
+    };
+  }
+
   const candidateMap = new Map();
+  const pushCandidate = (item, seedTitle, seedSource) => {
+    const key = `${item.ebay_user_id || ''}:${item.ebay_item_id || ''}:${item.supplier_url || ''}`;
+    if (candidateMap.has(key)) return;
+    candidateMap.set(key, {
+      ...item,
+      matched_title: seedTitle,
+      match_source: seedSource,
+    });
+  };
 
   for (const seed of seeds) {
     const pattern = titleToLikePattern(seed.title);
     if (!pattern) continue;
+    const fallbackTokens = extractSearchTokens(seed.title);
 
     const { data, error } = await supabase
       .from('items')
@@ -443,15 +639,259 @@ async function searchSupplierCandidates(queryParams) {
     }
 
     (data || []).forEach((item) => {
-      const key = `${item.ebay_user_id || ''}:${item.ebay_item_id || ''}`;
-      if (candidateMap.has(key)) return;
-      candidateMap.set(key, {
+      pushCandidate({
         ...item,
-        matched_title: seed.title,
-        match_source: seed.source,
         supplier_url: item.stocking_url || null,
-      });
+      }, seed.title, seed.source);
     });
+
+    const { data: lineItems, error: lineItemsError } = await supabase
+      .from('order_line_items')
+      .select('order_no, legacy_item_id, title, procurement_url, stocking_url, cost_price, item_image, created_at')
+      .or('procurement_url.not.is.null,stocking_url.not.is.null')
+      .ilike('title', `%${pattern}%`)
+      .order('created_at', { ascending: false })
+      .limit(numericLimit);
+
+    if (lineItemsError) {
+      if (String(lineItemsError.message || '').includes('statement timeout')) {
+        throw new Error('検索条件が広すぎます。キーワードを足してください。');
+      }
+      throw new Error(`Error fetching supplier candidates from order_line_items: ${lineItemsError.message}`);
+    }
+
+    const orderNos = [...new Set((lineItems || []).map((item) => item.order_no).filter(Boolean))];
+    let orderMap = new Map();
+    if (orderNos.length > 0) {
+      const { data: relatedOrders, error: relatedOrdersError } = await supabase
+        .from('orders')
+        .select('order_no, user_id, ebay_user_id')
+        .eq('user_id', user_id)
+        .in('order_no', orderNos);
+
+      if (relatedOrdersError) {
+        throw new Error(`Error fetching related orders: ${relatedOrdersError.message}`);
+      }
+
+      orderMap = new Map((relatedOrders || []).map((order) => [order.order_no, order]));
+    }
+
+    (lineItems || []).forEach((item) => {
+      const relatedOrder = orderMap.get(item.order_no);
+      if (!relatedOrder) return;
+      pushCandidate({
+        ebay_item_id: item.legacy_item_id || null,
+        ebay_user_id: relatedOrder.ebay_user_id || null,
+        sku: null,
+        item_title: item.title || null,
+        stocking_url: item.stocking_url || null,
+        cost_price: item.cost_price ?? null,
+        estimated_shipping_cost: null,
+        current_price_value: null,
+        current_price_currency: null,
+        primary_image_url: item.item_image || null,
+        updated_at: item.created_at || null,
+        supplier_url: item.procurement_url || item.stocking_url || null,
+      }, seed.title, `${seed.source}_order_line_items`);
+    });
+
+    if (candidateMap.size === 0 && fallbackTokens.length >= 2) {
+      let fallbackItemsQuery = supabase
+        .from('items')
+        .select('ebay_item_id, ebay_user_id, sku, item_title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency, primary_image_url, updated_at')
+        .eq('user_id', user_id)
+        .not('stocking_url', 'is', null)
+        .order('updated_at', { ascending: false })
+        .limit(numericLimit);
+      fallbackItemsQuery = applyTokenFilters(fallbackItemsQuery, 'item_title', fallbackTokens);
+      const { data: fallbackItems, error: fallbackItemsError } = await fallbackItemsQuery;
+
+      if (fallbackItemsError) {
+        throw new Error(`Error fetching fallback supplier candidates: ${fallbackItemsError.message}`);
+      }
+
+      (fallbackItems || []).forEach((item) => {
+        pushCandidate({
+          ...item,
+          supplier_url: item.stocking_url || null,
+        }, seed.title, `${seed.source}_token_fallback`);
+      });
+
+      let fallbackLineItemsQuery = supabase
+        .from('order_line_items')
+        .select('order_no, legacy_item_id, title, procurement_url, stocking_url, cost_price, item_image, created_at')
+        .or('procurement_url.not.is.null,stocking_url.not.is.null')
+        .order('created_at', { ascending: false })
+        .limit(numericLimit);
+      fallbackLineItemsQuery = applyTokenFilters(fallbackLineItemsQuery, 'title', fallbackTokens);
+      const { data: fallbackLineItems, error: fallbackLineItemsError } = await fallbackLineItemsQuery;
+
+      if (fallbackLineItemsError) {
+        throw new Error(`Error fetching fallback order_line_items candidates: ${fallbackLineItemsError.message}`);
+      }
+
+      const fallbackOrderNos = [...new Set((fallbackLineItems || []).map((item) => item.order_no).filter(Boolean))];
+      let fallbackOrderMap = new Map();
+      if (fallbackOrderNos.length > 0) {
+        const { data: fallbackOrders, error: fallbackOrdersError } = await supabase
+          .from('orders')
+          .select('order_no, user_id, ebay_user_id')
+          .eq('user_id', user_id)
+          .in('order_no', fallbackOrderNos);
+        if (fallbackOrdersError) {
+          throw new Error(`Error fetching fallback related orders: ${fallbackOrdersError.message}`);
+        }
+        fallbackOrderMap = new Map((fallbackOrders || []).map((order) => [order.order_no, order]));
+      }
+
+      (fallbackLineItems || []).forEach((item) => {
+        const relatedOrder = fallbackOrderMap.get(item.order_no);
+        if (!relatedOrder) return;
+        pushCandidate({
+          ebay_item_id: item.legacy_item_id || null,
+          ebay_user_id: relatedOrder.ebay_user_id || null,
+          sku: null,
+          item_title: item.title || null,
+          stocking_url: item.stocking_url || null,
+          cost_price: item.cost_price ?? null,
+          estimated_shipping_cost: null,
+          current_price_value: null,
+          current_price_currency: null,
+          primary_image_url: item.item_image || null,
+          updated_at: item.created_at || null,
+          supplier_url: item.procurement_url || item.stocking_url || null,
+        }, seed.title, `${seed.source}_order_line_items_token_fallback`);
+      });
+    }
+
+    if (candidateMap.size === 0) {
+      const ebayListings = await fetchEbayListingSeeds(account, seed.title);
+      const ebayItemIds = ebayListings.map((listing) => listing.legacyItemId).filter(Boolean);
+      const ebayTitles = ebayListings.map((listing) => listing.item_title).filter(Boolean);
+
+      if (ebayItemIds.length > 0) {
+        const { data: ebayLineItems, error: ebayLineItemsError } = await supabase
+          .from('order_line_items')
+          .select('order_no, legacy_item_id, title, procurement_url, stocking_url, cost_price, item_image, created_at')
+          .in('legacy_item_id', ebayItemIds)
+          .or('procurement_url.not.is.null,stocking_url.not.is.null')
+          .order('created_at', { ascending: false })
+          .limit(numericLimit);
+
+        if (ebayLineItemsError) {
+          throw new Error(`Error fetching eBay fallback line items: ${ebayLineItemsError.message}`);
+        }
+
+        const ebayOrderNos = [...new Set((ebayLineItems || []).map((item) => item.order_no).filter(Boolean))];
+        let ebayOrderMap = new Map();
+        if (ebayOrderNos.length > 0) {
+          const { data: ebayOrders, error: ebayOrdersError } = await supabase
+            .from('orders')
+            .select('order_no, user_id, ebay_user_id')
+            .eq('user_id', user_id)
+            .in('order_no', ebayOrderNos);
+          if (ebayOrdersError) {
+            throw new Error(`Error fetching eBay fallback related orders: ${ebayOrdersError.message}`);
+          }
+          ebayOrderMap = new Map((ebayOrders || []).map((order) => [order.order_no, order]));
+        }
+
+        (ebayLineItems || []).forEach((item) => {
+          const relatedOrder = ebayOrderMap.get(item.order_no);
+          if (!relatedOrder) return;
+          pushCandidate({
+            ebay_item_id: item.legacy_item_id || null,
+            ebay_user_id: relatedOrder.ebay_user_id || null,
+            sku: null,
+            item_title: item.title || null,
+            stocking_url: item.stocking_url || null,
+            cost_price: item.cost_price ?? null,
+            estimated_shipping_cost: null,
+            current_price_value: null,
+            current_price_currency: null,
+            primary_image_url: item.item_image || null,
+            updated_at: item.created_at || null,
+            supplier_url: item.procurement_url || item.stocking_url || null,
+          }, seed.title, `${seed.source}_ebay_listing_itemid_fallback`);
+        });
+      }
+
+      if (candidateMap.size === 0 && ebayTitles.length > 0) {
+        for (const ebayTitle of ebayTitles.slice(0, 10)) {
+          const ebayPattern = titleToLikePattern(ebayTitle);
+          if (!ebayPattern) continue;
+          const { data: ebayTitleLineItems, error: ebayTitleLineItemsError } = await supabase
+            .from('order_line_items')
+            .select('order_no, legacy_item_id, title, procurement_url, stocking_url, cost_price, item_image, created_at')
+            .or('procurement_url.not.is.null,stocking_url.not.is.null')
+            .ilike('title', `%${ebayPattern}%`)
+            .order('created_at', { ascending: false })
+            .limit(numericLimit);
+
+          if (ebayTitleLineItemsError) {
+            throw new Error(`Error fetching eBay fallback title matches: ${ebayTitleLineItemsError.message}`);
+          }
+
+          const ebayTitleOrderNos = [...new Set((ebayTitleLineItems || []).map((item) => item.order_no).filter(Boolean))];
+          let ebayTitleOrderMap = new Map();
+          if (ebayTitleOrderNos.length > 0) {
+            const { data: ebayTitleOrders, error: ebayTitleOrdersError } = await supabase
+              .from('orders')
+              .select('order_no, user_id, ebay_user_id')
+              .eq('user_id', user_id)
+              .in('order_no', ebayTitleOrderNos);
+            if (ebayTitleOrdersError) {
+              throw new Error(`Error fetching eBay fallback title related orders: ${ebayTitleOrdersError.message}`);
+            }
+            ebayTitleOrderMap = new Map((ebayTitleOrders || []).map((order) => [order.order_no, order]));
+          }
+
+          (ebayTitleLineItems || []).forEach((item) => {
+            const relatedOrder = ebayTitleOrderMap.get(item.order_no);
+            if (!relatedOrder) return;
+            pushCandidate({
+              ebay_item_id: item.legacy_item_id || null,
+              ebay_user_id: relatedOrder.ebay_user_id || null,
+              sku: null,
+              item_title: item.title || null,
+              stocking_url: item.stocking_url || null,
+              cost_price: item.cost_price ?? null,
+              estimated_shipping_cost: null,
+              current_price_value: null,
+              current_price_currency: null,
+              primary_image_url: item.item_image || null,
+              updated_at: item.created_at || null,
+              supplier_url: item.procurement_url || item.stocking_url || null,
+            }, seed.title, `${seed.source}_ebay_listing_title_fallback`);
+          });
+
+          if (candidateMap.size > 0) {
+            break;
+          }
+        }
+      }
+    }
+
+    if (candidateMap.size === 0) {
+      const sellerListings = await fetchSellerListingsByTitle(account, seed.title);
+      sellerListings.forEach((listing) => {
+        pushCandidate({
+          ebay_item_id: listing.legacyItemId || null,
+          ebay_user_id: account,
+          sku: listing.sku || null,
+          item_title: listing.item_title || null,
+          stocking_url: null,
+          cost_price: null,
+          estimated_shipping_cost: null,
+          current_price_value: null,
+          current_price_currency: null,
+          primary_image_url: listing.primary_image_url || null,
+          updated_at: null,
+          supplier_url: looksLikeUrl(listing.sku) ? listing.sku : null,
+          view_item_url: listing.view_item_url || null,
+        }, seed.title, `${seed.source}_seller_list_fallback`);
+      });
+    }
   }
 
   return {
