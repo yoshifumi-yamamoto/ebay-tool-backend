@@ -320,6 +320,48 @@ const normalizeSearchText = (value) => String(value || '')
 const titleToLikePattern = (value) => normalizeSearchText(value).replace(/\s+/g, '%');
 const countSearchTerms = (value) => normalizeSearchText(value).split(' ').filter(Boolean).length;
 const COMMON_SEARCH_TOKENS = new Set(['the', 'and', 'for', 'with', 'from', 'auto', 'scale']);
+const NON_ENGLISH_HINT_TOKENS = new Set([
+  'teclado', 'mecanico', 'mecánico', 'negro', 'blanco', 'rojo', 'azul', 'verde',
+  'cable', 'usado', 'probado', 'teclas', 'raton', 'ratón', 'con', 'sin',
+  'clavier', 'souris', 'noir', 'blanc', 'rouge', 'gris', 'avec', 'sans', 'occasion',
+  'tastatur', 'maus', 'schwarz', 'weiss', 'weiß', 'gebraucht', 'getestet', 'mit', 'ohne',
+]);
+const SEARCH_TITLE_STOPWORDS = new Set([
+  'keyboard', 'mechanical', 'wired', 'wireless', 'black', 'white', 'red', 'blue', 'green',
+  'used', 'tested', 'test', 'working', 'gaming', 'teclado', 'mecanico', 'mecánico', 'negro',
+  'blanco', 'rojo', 'azul', 'verde', 'cable', 'usado', 'probado', 'teclas', 'con', 'sin',
+  'clavier', 'souris', 'noir', 'rouge', 'gris', 'avec', 'sans', 'occasion',
+  'tastatur', 'maus', 'schwarz', 'weiss', 'weiß', 'gebraucht', 'getestet', 'mit', 'ohne',
+]);
+const SEARCH_TITLE_REPLACEMENTS = [
+  [/\bteclado mec[aá]nico\b/gu, 'keyboard'],
+  [/\bteclado\b/gu, 'keyboard'],
+  [/\bmec[aá]nico\b/gu, 'mechanical'],
+  [/\bcon cable\b/gu, 'wired'],
+  [/\bcableado\b/gu, 'wired'],
+  [/\bnegro\b/gu, 'black'],
+  [/\bblanco\b/gu, 'white'],
+  [/\brojo\b/gu, 'red'],
+  [/\bazul\b/gu, 'blue'],
+  [/\bverde\b/gu, 'green'],
+  [/\busado\b/gu, 'used'],
+  [/\bprobado\b/gu, 'tested'],
+  [/\bclavier\b/gu, 'keyboard'],
+  [/\bsouris\b/gu, 'mouse'],
+  [/\bavec fil\b/gu, 'wired'],
+  [/\bnoir\b/gu, 'black'],
+  [/\bblanc\b/gu, 'white'],
+  [/\brouge\b/gu, 'red'],
+  [/\bgris\b/gu, 'gray'],
+  [/\boccasion\b/gu, 'used'],
+  [/\btastatur\b/gu, 'keyboard'],
+  [/\bmaus\b/gu, 'mouse'],
+  [/\bmit kabel\b/gu, 'wired'],
+  [/\bschwarz\b/gu, 'black'],
+  [/\bwei(?:ss|ß)\b/gu, 'white'],
+  [/\bgebraucht\b/gu, 'used'],
+  [/\bgetestet\b/gu, 'tested'],
+];
 
 const extractSearchTokens = (value) => {
   const normalized = normalizeSearchText(value);
@@ -336,6 +378,63 @@ const extractSearchTokens = (value) => {
     uniqueTokens.push(token);
   });
   return uniqueTokens.slice(0, 5);
+};
+
+const isLikelyNonEnglishTitle = (value) => {
+  const normalized = normalizeSearchText(value);
+  if (!normalized) return false;
+  const tokens = normalized
+    .split(' ')
+    .map((token) => token.replace(/[^\p{L}\p{N}\-]/gu, ''))
+    .filter(Boolean);
+  if (!tokens.length) return false;
+  return tokens.some((token) => NON_ENGLISH_HINT_TOKENS.has(token));
+};
+
+const buildSupplementalSeedTitles = (value) => {
+  const normalized = normalizeSearchText(value);
+  if (!normalized || !isLikelyNonEnglishTitle(normalized)) {
+    return [];
+  }
+
+  let translated = normalized;
+  SEARCH_TITLE_REPLACEMENTS.forEach(([pattern, replacement]) => {
+    translated = translated.replace(pattern, replacement);
+  });
+  translated = translated.replace(/[^\p{L}\p{N}\- ]/gu, ' ').replace(/\s+/g, ' ').trim();
+
+  const translatedTokens = translated
+    .split(' ')
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  const filteredTokens = translatedTokens.filter((token) => {
+    if (SEARCH_TITLE_STOPWORDS.has(token)) return false;
+    if (token.length <= 1) return false;
+    return /[\p{L}\p{N}]/u.test(token);
+  });
+
+  const uniqueFilteredTokens = [];
+  filteredTokens.forEach((token) => {
+    if (!uniqueFilteredTokens.includes(token)) {
+      uniqueFilteredTokens.push(token);
+    }
+  });
+
+  const titles = [];
+  if (uniqueFilteredTokens.length >= 2) {
+    titles.push(uniqueFilteredTokens.join(' '));
+  }
+
+  const modelTokens = uniqueFilteredTokens.filter((token) => /\d/.test(token) || /[a-z]/i.test(token));
+  if (modelTokens.length >= 2) {
+    const compactModelTitle = modelTokens.slice(0, 4).join(' ');
+    if (compactModelTitle && !titles.includes(compactModelTitle)) {
+      titles.push(compactModelTitle);
+    }
+  }
+
+  return titles.slice(0, 3);
 };
 
 const applyTokenFilters = (query, column, tokens) => {
@@ -520,9 +619,16 @@ async function resolveLookupSeeds({ user_id, account, title, sku, itemId }) {
       sourceValue,
     });
   };
+  const pushSupplementalSeeds = (seedTitle, source, sourceValue) => {
+    const supplementalTitles = buildSupplementalSeedTitles(seedTitle);
+    supplementalTitles.forEach((supplementalTitle) => {
+      pushSeed(supplementalTitle, `${source}_normalized`, sourceValue);
+    });
+  };
 
   if (title) {
     pushSeed(title, 'title', title);
+    pushSupplementalSeeds(title, 'title', title);
   }
 
   if (itemId) {
@@ -536,12 +642,14 @@ async function resolveLookupSeeds({ user_id, account, title, sku, itemId }) {
 
     if (localItem?.item_title) {
       pushSeed(localItem.item_title, 'itemId_local', itemId);
+      pushSupplementalSeeds(localItem.item_title, 'itemId_local', itemId);
     } else {
       const refreshToken = await getRefreshTokenByEbayUserId(account);
       const accessToken = await refreshEbayToken(refreshToken);
       const item = await fetchItemDetails(itemId, accessToken);
       if (item?.Title) {
         pushSeed(item.Title, 'itemId_ebay', itemId);
+        pushSupplementalSeeds(item.Title, 'itemId_ebay', itemId);
       }
     }
   }
@@ -557,10 +665,12 @@ async function resolveLookupSeeds({ user_id, account, title, sku, itemId }) {
 
     if (localSkuItem?.item_title) {
       pushSeed(localSkuItem.item_title, 'sku_local', sku);
+      pushSupplementalSeeds(localSkuItem.item_title, 'sku_local', sku);
     } else {
       const inventoryItem = await fetchInventoryItemBySku(account, sku);
       if (inventoryItem?.product?.title) {
         pushSeed(inventoryItem.product.title, 'sku_ebay', sku);
+        pushSupplementalSeeds(inventoryItem.product.title, 'sku_ebay', sku);
       }
     }
   }
