@@ -534,6 +534,47 @@ const titleMatchesTokens = (title, tokens) => {
   return tokens.every((token) => normalized.includes(token));
 };
 
+let cachedBrowseApplicationToken = null;
+let cachedBrowseApplicationTokenExpiresAt = 0;
+
+async function getEbayBrowseApplicationToken() {
+  if (cachedBrowseApplicationToken && Date.now() < cachedBrowseApplicationTokenExpiresAt) {
+    return cachedBrowseApplicationToken;
+  }
+
+  let queryString;
+  try {
+    queryString = (await import('query-string')).default;
+  } catch (error) {
+    throw new Error(`Failed to import query-string: ${error.message}`);
+  }
+
+  const response = await axios.post(
+    'https://api.ebay.com/identity/v1/oauth2/token',
+    queryString.stringify({
+      grant_type: 'client_credentials',
+      scope: 'https://api.ebay.com/oauth/api_scope',
+    }),
+    {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${Buffer.from(`${process.env.EBAY_APP_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64')}`,
+      },
+      timeout: 8000,
+    }
+  );
+
+  const accessToken = response?.data?.access_token || null;
+  const expiresIn = Number(response?.data?.expires_in || 7200);
+  if (!accessToken) {
+    throw new Error('Failed to obtain eBay Browse application token');
+  }
+
+  cachedBrowseApplicationToken = accessToken;
+  cachedBrowseApplicationTokenExpiresAt = Date.now() + Math.max((expiresIn - 300) * 1000, 60 * 1000);
+  return cachedBrowseApplicationToken;
+}
+
 const buildMarketplaceSearchQueries = (seedTitle) => {
   const searchTokens = extractSearchTokens(seedTitle);
   if (searchTokens.length === 0) {
@@ -568,44 +609,43 @@ async function searchUsMarketplaceByTitle(seedTitle, limit = 10) {
   if (searchTokens.length === 0) return [];
   const queryCandidates = buildMarketplaceSearchQueries(keywords);
   let lastError = null;
+  const applicationToken = await getEbayBrowseApplicationToken();
 
   for (const queryText of queryCandidates) {
     try {
-      const response = await axios.get('https://svcs.ebay.com/services/search/FindingService/v1', {
+      const response = await axios.get('https://api.ebay.com/buy/browse/v1/item_summary/search', {
         params: {
-          'OPERATION-NAME': 'findItemsByKeywords',
-          'SERVICE-VERSION': '1.13.0',
-          'SECURITY-APPNAME': process.env.EBAY_APP_ID,
-          'RESPONSE-DATA-FORMAT': 'JSON',
-          'REST-PAYLOAD': true,
-          'GLOBAL-ID': 'EBAY-US',
-          keywords: queryText,
-          'paginationInput.entriesPerPage': String(Math.max(limit * 5, 50)),
-          'itemFilter(0).name': 'ListingType',
-          'itemFilter(0).value(0)': 'FixedPrice',
+          q: queryText,
+          limit: String(Math.min(Math.max(limit * 3, 20), 50)),
+          filter: 'buyingOptions:{FIXED_PRICE}',
+        },
+        headers: {
+          Authorization: `Bearer ${applicationToken}`,
+          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
         },
         timeout: 8000,
       });
 
-      const items =
-        response?.data?.findItemsByKeywordsResponse?.[0]?.searchResult?.[0]?.item || [];
+      const items = response?.data?.itemSummaries || [];
 
       const normalizedItems = (Array.isArray(items) ? items : [])
         .map((item) => ({
-          ebay_item_id: item?.itemId?.[0] || null,
+          ebay_item_id: item?.legacyItemId || null,
           ebay_user_id: 'EBAY_US',
           sku: null,
-          item_title: item?.title?.[0] || null,
+          item_title: item?.title || null,
           stocking_url: null,
           cost_price: null,
           estimated_shipping_cost: null,
-          current_price_value: item?.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || null,
-          current_price_currency: item?.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'] || null,
-          primary_image_url: item?.galleryURL?.[0] || null,
+          current_price_value: item?.price?.value || null,
+          current_price_currency: item?.price?.currency || null,
+          primary_image_url: item?.image?.imageUrl || null,
           updated_at: null,
-          supplier_url: item?.viewItemURL?.[0] || null,
-          site_code: 'US',
-          is_us_listing: String(item?.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'] || '').toUpperCase() === 'USD',
+          supplier_url: item?.itemWebUrl || null,
+          site_code: item?.listingMarketplaceId === 'EBAY_US' ? 'US' : item?.listingMarketplaceId || null,
+          is_us_listing:
+            String(item?.listingMarketplaceId || '').toUpperCase() === 'EBAY_US' &&
+            String(item?.price?.currency || '').toUpperCase() === 'USD',
         }))
         .filter((item) => item.is_us_listing && titleMatchesTokens(item.item_title, searchTokens))
         .slice(0, limit);
