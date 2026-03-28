@@ -942,7 +942,30 @@ const logItemSearchStep = (label, details = {}) => {
   console.log(`[item-search] ${label}`, details);
 };
 
-async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericLimit }) {
+async function searchHistoricalUsItemsByTitle({ userId, account, seedTitle, excludeItemId, limit }) {
+  const pattern = titleToLikePattern(seedTitle);
+  if (!pattern) return [];
+
+  const { data, error } = await supabase
+    .from('items')
+    .select('ebay_item_id, ebay_user_id, sku, item_title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency, primary_image_url, updated_at')
+    .eq('user_id', userId)
+    .eq('ebay_user_id', account)
+    .neq('ebay_item_id', excludeItemId)
+    .eq('current_price_currency', 'USD')
+    .ilike('item_title', `%${pattern}%`)
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`Error fetching historical US items: ${error.message}`);
+  }
+
+  const tokens = extractSearchTokens(seedTitle);
+  return (data || []).filter((item) => titleMatchesTokens(item.item_title, tokens));
+}
+
+async function searchItemIdSupplierCandidates({ userId, account, itemId, seeds, numericLimit }) {
   const startedAt = Date.now();
   const candidateMap = new Map();
   const seedEntries = seeds.slice(0, 2);
@@ -960,9 +983,27 @@ async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericL
   });
 
   const pushCandidate = (listing, seed, matchSource) => {
-    if (!listing?.is_us_listing) return;
-    if (String(listing.legacyItemId || '') === normalizedItemId) return;
-    const candidate = toUsSupplierCandidate(listing, account);
+    const listingItemId = String(listing.legacyItemId || listing.ebay_item_id || '').trim();
+    if (listingItemId === normalizedItemId) return;
+    const candidate = listing.supplier_url
+      ? {
+          ebay_item_id: listing.ebay_item_id || listingItemId || null,
+          ebay_user_id: listing.ebay_user_id || account,
+          sku: listing.sku || null,
+          item_title: listing.item_title || null,
+          stocking_url: listing.stocking_url || null,
+          cost_price: listing.cost_price ?? null,
+          estimated_shipping_cost: listing.estimated_shipping_cost ?? null,
+          current_price_value: listing.current_price_value ?? null,
+          current_price_currency: listing.current_price_currency ?? null,
+          primary_image_url: listing.primary_image_url || null,
+          updated_at: listing.updated_at || null,
+          supplier_url: listing.supplier_url,
+          site_code: listing.site_code || 'US',
+          is_us_listing: listing.is_us_listing !== false,
+        }
+      : toUsSupplierCandidate(listing, account);
+    if (!candidate?.is_us_listing) return;
     const key = `${candidate.ebay_user_id || ''}:${candidate.ebay_item_id || ''}:${candidate.supplier_url || ''}`;
     if (candidateMap.has(key)) return;
     candidateMap.set(key, {
@@ -1010,6 +1051,34 @@ async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericL
       };
       pushCandidate(listing, seed, 'title_search_us');
     });
+
+    const historicalStartedAt = Date.now();
+    const historicalListings = await searchHistoricalUsItemsByTitle({
+      userId,
+      account,
+      seedTitle: seed.title,
+      excludeItemId: normalizedItemId,
+      limit: Math.min(Math.max(numericLimit, 10), 30),
+    }).catch((error) => {
+      console.warn('[item-search] failed to search historical items by title:', {
+        account,
+        itemId: normalizedItemId,
+        seedSource: seed.source,
+        seedTitle: seed.title,
+        error: error.message,
+      });
+      return [];
+    });
+    const historicalElapsedMs = Date.now() - historicalStartedAt;
+    historicalListings.forEach((item) => {
+      pushCandidate({
+        ...item,
+        supplier_url: item.stocking_url || (looksLikeUrl(item.sku) ? item.sku : buildUsEbayItemUrl(item.ebay_item_id)),
+        site_code: 'US',
+        is_us_listing: true,
+      }, seed, 'historical_us');
+    });
+
     const addedCount = candidateMap.size - beforePushCount;
 
     logItemSearchStep('seed search done', {
@@ -1018,10 +1087,12 @@ async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericL
       seedSource: seed.source,
       seedTitle: seed.title,
       marketplaceListingsCount: marketplaceListings.length,
+      historicalListingsCount: historicalListings.length,
       addedCandidates: addedCount,
       candidateTotal: candidateMap.size,
       elapsedMs: Date.now() - seedStartedAt,
       marketplaceElapsedMs,
+      historicalElapsedMs,
     });
 
     if (candidateMap.size >= numericLimit) {
@@ -1070,7 +1141,7 @@ async function searchSupplierCandidates(queryParams) {
   }
 
   if (itemId) {
-    return searchItemIdSupplierCandidates({ account, itemId, seeds, numericLimit });
+    return searchItemIdSupplierCandidates({ userId: user_id, account, itemId, seeds, numericLimit });
   }
 
   const candidateMap = new Map();
