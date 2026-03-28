@@ -581,9 +581,7 @@ async function searchUsMarketplaceByTitle(seedTitle, limit = 10) {
     .slice(0, limit);
 }
 
-async function fetchEbayListingSeeds(account, seedTitle, maxPages = 30) {
-  const refreshToken = await getRefreshTokenByEbayUserId(account);
-  const accessToken = await refreshEbayToken(refreshToken);
+async function fetchEbayListingSeedsWithAccessToken(accessToken, seedTitle, maxPages = 30) {
   const tokens = extractSearchTokens(seedTitle);
   if (tokens.length < 2) {
     return [];
@@ -611,9 +609,13 @@ async function fetchEbayListingSeeds(account, seedTitle, maxPages = 30) {
   return Array.from(deduped.values()).slice(0, 50);
 }
 
-async function fetchSellerListingsByTitle(account, seedTitle, maxPages = 20) {
+async function fetchEbayListingSeeds(account, seedTitle, maxPages = 30) {
   const refreshToken = await getRefreshTokenByEbayUserId(account);
   const accessToken = await refreshEbayToken(refreshToken);
+  return fetchEbayListingSeedsWithAccessToken(accessToken, seedTitle, maxPages);
+}
+
+async function fetchSellerListingsByTitleWithAccessToken(accessToken, seedTitle, maxPages = 20) {
   const tokens = extractSearchTokens(seedTitle);
   if (tokens.length < 2) {
     return [];
@@ -699,6 +701,12 @@ async function fetchSellerListingsByTitle(account, seedTitle, maxPages = 20) {
     deduped.set(key, listing);
   });
   return Array.from(deduped.values()).slice(0, 50);
+}
+
+async function fetchSellerListingsByTitle(account, seedTitle, maxPages = 20) {
+  const refreshToken = await getRefreshTokenByEbayUserId(account);
+  const accessToken = await refreshEbayToken(refreshToken);
+  return fetchSellerListingsByTitleWithAccessToken(accessToken, seedTitle, maxPages);
 }
 
 async function fetchDirectEbayItemCandidate(account, itemId) {
@@ -823,6 +831,73 @@ async function resolveLookupSeeds({ user_id, account, title, sku, itemId }) {
   return seeds;
 }
 
+const toUsSupplierCandidate = (listing, account) => ({
+  ebay_item_id: listing.legacyItemId || null,
+  ebay_user_id: account,
+  sku: listing.sku || null,
+  item_title: listing.item_title || null,
+  stocking_url: null,
+  cost_price: null,
+  estimated_shipping_cost: null,
+  current_price_value: listing.current_price_value ?? null,
+  current_price_currency: listing.current_price_currency ?? null,
+  primary_image_url: listing.primary_image_url || null,
+  updated_at: null,
+  supplier_url: normalizeEbayViewUrlToUs(listing.view_item_url || null, listing.legacyItemId || null),
+  site_code: listing.site_code || null,
+  is_us_listing: true,
+});
+
+async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericLimit }) {
+  const refreshToken = await getRefreshTokenByEbayUserId(account);
+  const accessToken = await refreshEbayToken(refreshToken);
+  const candidateMap = new Map();
+  const seedEntries = seeds.slice(0, 2);
+  const normalizedItemId = String(itemId || '').trim();
+
+  const pushCandidate = (listing, seed, matchSource) => {
+    if (!listing?.is_us_listing) return;
+    if (String(listing.legacyItemId || '') === normalizedItemId) return;
+    const candidate = toUsSupplierCandidate(listing, account);
+    const key = `${candidate.ebay_user_id || ''}:${candidate.ebay_item_id || ''}:${candidate.supplier_url || ''}`;
+    if (candidateMap.has(key)) return;
+    candidateMap.set(key, {
+      ...candidate,
+      matched_title: seed.title,
+      match_source: `${seed.source}_${matchSource}`,
+    });
+  };
+
+  for (const seed of seedEntries) {
+    const [sellerListings, activeListings] = await Promise.all([
+      fetchSellerListingsByTitleWithAccessToken(accessToken, seed.title, 2).catch((error) => {
+        console.warn('[item-search] failed to search seller listings fallback:', error.message);
+        return [];
+      }),
+      fetchEbayListingSeedsWithAccessToken(accessToken, seed.title, 2).catch((error) => {
+        console.warn('[item-search] failed to search active listings fallback:', error.message);
+        return [];
+      }),
+    ]);
+
+    sellerListings.forEach((listing) => pushCandidate(listing, seed, 'seller_list_us'));
+    activeListings.forEach((listing) => {
+      if (String(listing.site_code || '').toUpperCase() !== 'US') return;
+      if (String(listing.current_price_currency || '').toUpperCase() !== 'USD') return;
+      pushCandidate({ ...listing, is_us_listing: true }, seed, 'active_list_us');
+    });
+
+    if (candidateMap.size >= numericLimit) {
+      break;
+    }
+  }
+
+  return {
+    seeds,
+    candidates: Array.from(candidateMap.values()).slice(0, numericLimit),
+  };
+}
+
 async function searchSupplierCandidates(queryParams) {
   const { user_id, account, title, sku, itemId, limit = 50 } = queryParams;
 
@@ -844,21 +919,13 @@ async function searchSupplierCandidates(queryParams) {
 
   const numericLimit = Number.isFinite(Number(limit)) ? Number(limit) : 50;
   const seeds = await resolveLookupSeeds({ user_id, account, title, sku, itemId });
-  const directEbayCandidate = itemId ? await fetchDirectEbayItemCandidate(account, itemId) : null;
 
   if (!seeds.length) {
     return { seeds: [], candidates: [] };
   }
 
-  if (directEbayCandidate && directEbayCandidate.supplier_url) {
-    return {
-      seeds,
-      candidates: [{
-        ...directEbayCandidate,
-        matched_title: directEbayCandidate.item_title || itemId,
-        match_source: 'itemId_direct_ebay',
-      }],
-    };
+  if (itemId) {
+    return searchItemIdSupplierCandidates({ account, itemId, seeds, numericLimit });
   }
 
   const candidateMap = new Map();
@@ -874,81 +941,8 @@ async function searchSupplierCandidates(queryParams) {
 
   for (const seed of seeds.slice(0, 3)) {
     try {
-      const sellerListings = await fetchSellerListingsByTitle(account, seed.title);
-      sellerListings.forEach((listing) => {
-        if (itemId && String(listing.legacyItemId || '') === String(itemId)) {
-          return;
-        }
-        if (!listing.is_us_listing) {
-          return;
-        }
-        pushCandidate({
-          ebay_item_id: listing.legacyItemId || null,
-          ebay_user_id: account,
-          sku: listing.sku || null,
-          item_title: listing.item_title || null,
-          stocking_url: null,
-          cost_price: null,
-          estimated_shipping_cost: null,
-          current_price_value: listing.current_price_value ?? null,
-          current_price_currency: listing.current_price_currency ?? null,
-          primary_image_url: listing.primary_image_url || null,
-          updated_at: null,
-          supplier_url: listing.view_item_url || null,
-          site_code: listing.site_code || null,
-          is_us_listing: true,
-        }, seed.title, `${seed.source}_seller_list_us`);
-      });
-    } catch (error) {
-      console.warn('[item-search] failed to search seller listings fallback:', error.message);
-    }
-
-    try {
-      const activeListings = await fetchEbayListingSeeds(account, seed.title);
-      activeListings.forEach((listing) => {
-        if (itemId && String(listing.legacyItemId || '') === String(itemId)) {
-          return;
-        }
-        if (!(listing.current_price_currency || '').toUpperCase().includes('USD')) {
-          return;
-        }
-        if (String(listing.site_code || '').toUpperCase() !== 'US') {
-          return;
-        }
-        pushCandidate({
-          ebay_item_id: listing.legacyItemId || null,
-          ebay_user_id: account,
-          sku: listing.sku || null,
-          item_title: listing.item_title || null,
-          stocking_url: null,
-          cost_price: null,
-          estimated_shipping_cost: null,
-          current_price_value: listing.current_price_value ?? null,
-          current_price_currency: listing.current_price_currency ?? null,
-          primary_image_url: listing.primary_image_url || null,
-          updated_at: null,
-          supplier_url: normalizeEbayViewUrlToUs(listing.view_item_url || null, listing.legacyItemId || null),
-          site_code: listing.site_code || null,
-          is_us_listing: true,
-        }, seed.title, `${seed.source}_active_list_us`);
-      });
-    } catch (error) {
-      console.warn('[item-search] failed to search active listings fallback:', error.message);
-    }
-
-    if (candidateMap.size >= numericLimit) {
-      return {
-        seeds,
-        candidates: Array.from(candidateMap.values()).slice(0, numericLimit),
-      };
-    }
-
-    try {
       const usListings = await searchUsMarketplaceByTitle(seed.title, Math.min(numericLimit, 10));
       usListings.forEach((item) => {
-        if (itemId && String(item.ebay_item_id || '') === String(itemId)) {
-          return;
-        }
         pushCandidate(item, seed.title, `${seed.source}_ebay_us_marketplace`);
       });
       if (candidateMap.size >= numericLimit) {
@@ -960,15 +954,6 @@ async function searchSupplierCandidates(queryParams) {
     } catch (error) {
       console.warn('[item-search] failed to search EBAY-US marketplace:', error.message);
     }
-  }
-
-  if (itemId) {
-    return {
-      seeds,
-      candidates: Array.from(candidateMap.values())
-        .filter((item) => item?.is_us_listing === true || String(item?.site_code || '').toUpperCase() === 'US')
-        .slice(0, numericLimit),
-    };
   }
 
   for (const seed of seeds) {
