@@ -854,8 +854,6 @@ const logItemSearchStep = (label, details = {}) => {
 
 async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericLimit }) {
   const startedAt = Date.now();
-  const refreshToken = await getRefreshTokenByEbayUserId(account);
-  const accessToken = await refreshEbayToken(refreshToken);
   const candidateMap = new Map();
   const seedEntries = seeds.slice(0, 2);
   const normalizedItemId = String(itemId || '').trim();
@@ -893,37 +891,34 @@ async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericL
       seedTitle: seed.title,
     });
 
-    const sellerStartedAt = Date.now();
-    const [sellerListings, activeListings] = await Promise.all([
-      fetchSellerListingsByTitleWithAccessToken(accessToken, seed.title, 2).catch((error) => {
-        console.warn('[item-search] failed to search seller listings fallback:', {
-          account,
-          itemId: normalizedItemId,
-          seedSource: seed.source,
-          seedTitle: seed.title,
-          error: error.message,
-        });
-        return [];
-      }),
-      fetchEbayListingSeedsWithAccessToken(accessToken, seed.title, 2).catch((error) => {
-        console.warn('[item-search] failed to search active listings fallback:', {
-          account,
-          itemId: normalizedItemId,
-          seedSource: seed.source,
-          seedTitle: seed.title,
-          error: error.message,
-        });
-        return [];
-      }),
-    ]);
-    const sellerElapsedMs = Date.now() - sellerStartedAt;
+    const searchStartedAt = Date.now();
+    const marketplaceListings = await searchUsMarketplaceByTitle(seed.title, Math.min(Math.max(numericLimit, 10), 20)).catch((error) => {
+      console.warn('[item-search] failed to search marketplace by title:', {
+        account,
+        itemId: normalizedItemId,
+        seedSource: seed.source,
+        seedTitle: seed.title,
+        error: error.message,
+      });
+      return [];
+    });
+    const marketplaceElapsedMs = Date.now() - searchStartedAt;
 
     const beforePushCount = candidateMap.size;
-    sellerListings.forEach((listing) => pushCandidate(listing, seed, 'seller_list_us'));
-    activeListings.forEach((listing) => {
-      if (String(listing.site_code || '').toUpperCase() !== 'US') return;
-      if (String(listing.current_price_currency || '').toUpperCase() !== 'USD') return;
-      pushCandidate({ ...listing, is_us_listing: true }, seed, 'active_list_us');
+    marketplaceListings.forEach((item) => {
+      if (String(item.ebay_item_id || '') === normalizedItemId) return;
+      const listing = {
+        legacyItemId: item.ebay_item_id,
+        sku: item.sku,
+        item_title: item.item_title,
+        primary_image_url: item.primary_image_url,
+        current_price_value: item.current_price_value,
+        current_price_currency: item.current_price_currency,
+        site_code: item.site_code,
+        is_us_listing: item.is_us_listing,
+        view_item_url: item.supplier_url,
+      };
+      pushCandidate(listing, seed, 'title_search_us');
     });
     const addedCount = candidateMap.size - beforePushCount;
 
@@ -932,12 +927,11 @@ async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericL
       itemId: normalizedItemId,
       seedSource: seed.source,
       seedTitle: seed.title,
-      sellerListingsCount: sellerListings.length,
-      activeListingsCount: activeListings.length,
+      marketplaceListingsCount: marketplaceListings.length,
       addedCandidates: addedCount,
       candidateTotal: candidateMap.size,
       elapsedMs: Date.now() - seedStartedAt,
-      parallelListingsElapsedMs: sellerElapsedMs,
+      marketplaceElapsedMs,
     });
 
     if (candidateMap.size >= numericLimit) {
