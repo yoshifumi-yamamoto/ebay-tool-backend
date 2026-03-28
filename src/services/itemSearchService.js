@@ -447,6 +447,27 @@ const applyTokenFilters = (query, column, tokens) => {
 
 const looksLikeUrl = (value) => /^https?:\/\//i.test(String(value || '').trim());
 
+const buildUsEbayItemUrl = (itemId) => {
+  const normalizedItemId = String(itemId || '').trim();
+  return normalizedItemId ? `https://www.ebay.com/itm/${normalizedItemId}` : null;
+};
+
+const normalizeEbayViewUrlToUs = (url, itemId) => {
+  const fallbackUrl = buildUsEbayItemUrl(itemId);
+  if (!looksLikeUrl(url)) {
+    return fallbackUrl;
+  }
+  try {
+    const parsed = new URL(url);
+    if (!/ebay\./i.test(parsed.hostname)) {
+      return url;
+    }
+    return fallbackUrl || url;
+  } catch (_error) {
+    return fallbackUrl || url;
+  }
+};
+
 const titleMatchesTokens = (title, tokens) => {
   const normalized = normalizeSearchText(title);
   return tokens.every((token) => normalized.includes(token));
@@ -538,7 +559,10 @@ async function fetchSellerListingsByTitle(account, seedTitle, maxPages = 20) {
         primary_image_url: Array.isArray(item?.PictureDetails?.PictureURL)
           ? item.PictureDetails.PictureURL[0]
           : item?.PictureDetails?.PictureURL || null,
-        view_item_url: item?.ListingDetails?.ViewItemURL || item?.ListingDetails?.ViewItemURLForNaturalSearch || null,
+        view_item_url: normalizeEbayViewUrlToUs(
+          item?.ListingDetails?.ViewItemURL || item?.ListingDetails?.ViewItemURLForNaturalSearch || null,
+          item?.ItemID || null
+        ),
       });
     });
 
@@ -573,6 +597,10 @@ async function fetchDirectEbayItemCandidate(account, itemId) {
   const rawPictures = item?.PictureDetails?.PictureURL;
   const primaryImage = Array.isArray(rawPictures) ? rawPictures[0] : rawPictures || null;
   const sku = item?.SKU || null;
+  const viewItemUrl = normalizeEbayViewUrlToUs(
+    item?.ListingDetails?.ViewItemURL || item?.ListingDetails?.ViewItemURLForNaturalSearch || null,
+    itemId
+  );
 
   return {
     ebay_item_id: itemId,
@@ -586,8 +614,8 @@ async function fetchDirectEbayItemCandidate(account, itemId) {
     current_price_currency: null,
     primary_image_url: primaryImage,
     updated_at: null,
-    supplier_url: looksLikeUrl(sku) ? sku : null,
-    view_item_url: item?.ListingDetails?.ViewItemURL || item?.ListingDetails?.ViewItemURLForNaturalSearch || null,
+    supplier_url: looksLikeUrl(sku) ? sku : viewItemUrl,
+    view_item_url: viewItemUrl,
   };
 }
 
@@ -997,7 +1025,9 @@ async function searchSupplierCandidates(queryParams) {
           current_price_currency: null,
           primary_image_url: listing.primary_image_url || null,
           updated_at: null,
-          supplier_url: looksLikeUrl(listing.sku) ? listing.sku : null,
+          supplier_url: looksLikeUrl(listing.sku)
+            ? listing.sku
+            : normalizeEbayViewUrlToUs(listing.view_item_url, listing.legacyItemId || null),
           view_item_url: listing.view_item_url || null,
         }, seed.title, `${seed.source}_seller_list_fallback`);
       });
