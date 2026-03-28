@@ -848,12 +848,28 @@ const toUsSupplierCandidate = (listing, account) => ({
   is_us_listing: true,
 });
 
+const logItemSearchStep = (label, details = {}) => {
+  console.log(`[item-search] ${label}`, details);
+};
+
 async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericLimit }) {
+  const startedAt = Date.now();
   const refreshToken = await getRefreshTokenByEbayUserId(account);
   const accessToken = await refreshEbayToken(refreshToken);
   const candidateMap = new Map();
   const seedEntries = seeds.slice(0, 2);
   const normalizedItemId = String(itemId || '').trim();
+
+  logItemSearchStep('itemId search start', {
+    account,
+    itemId: normalizedItemId,
+    seedCount: seedEntries.length,
+    seeds: seedEntries.map((seed) => ({
+      source: seed.source,
+      title: seed.title,
+    })),
+    limit: numericLimit,
+  });
 
   const pushCandidate = (listing, seed, matchSource) => {
     if (!listing?.is_us_listing) return;
@@ -869,28 +885,73 @@ async function searchItemIdSupplierCandidates({ account, itemId, seeds, numericL
   };
 
   for (const seed of seedEntries) {
+    const seedStartedAt = Date.now();
+    logItemSearchStep('seed search start', {
+      account,
+      itemId: normalizedItemId,
+      seedSource: seed.source,
+      seedTitle: seed.title,
+    });
+
+    const sellerStartedAt = Date.now();
     const [sellerListings, activeListings] = await Promise.all([
       fetchSellerListingsByTitleWithAccessToken(accessToken, seed.title, 2).catch((error) => {
-        console.warn('[item-search] failed to search seller listings fallback:', error.message);
+        console.warn('[item-search] failed to search seller listings fallback:', {
+          account,
+          itemId: normalizedItemId,
+          seedSource: seed.source,
+          seedTitle: seed.title,
+          error: error.message,
+        });
         return [];
       }),
       fetchEbayListingSeedsWithAccessToken(accessToken, seed.title, 2).catch((error) => {
-        console.warn('[item-search] failed to search active listings fallback:', error.message);
+        console.warn('[item-search] failed to search active listings fallback:', {
+          account,
+          itemId: normalizedItemId,
+          seedSource: seed.source,
+          seedTitle: seed.title,
+          error: error.message,
+        });
         return [];
       }),
     ]);
+    const sellerElapsedMs = Date.now() - sellerStartedAt;
 
+    const beforePushCount = candidateMap.size;
     sellerListings.forEach((listing) => pushCandidate(listing, seed, 'seller_list_us'));
     activeListings.forEach((listing) => {
       if (String(listing.site_code || '').toUpperCase() !== 'US') return;
       if (String(listing.current_price_currency || '').toUpperCase() !== 'USD') return;
       pushCandidate({ ...listing, is_us_listing: true }, seed, 'active_list_us');
     });
+    const addedCount = candidateMap.size - beforePushCount;
+
+    logItemSearchStep('seed search done', {
+      account,
+      itemId: normalizedItemId,
+      seedSource: seed.source,
+      seedTitle: seed.title,
+      sellerListingsCount: sellerListings.length,
+      activeListingsCount: activeListings.length,
+      addedCandidates: addedCount,
+      candidateTotal: candidateMap.size,
+      elapsedMs: Date.now() - seedStartedAt,
+      parallelListingsElapsedMs: sellerElapsedMs,
+    });
 
     if (candidateMap.size >= numericLimit) {
       break;
     }
   }
+
+  logItemSearchStep('itemId search done', {
+    account,
+    itemId: normalizedItemId,
+    seedCount: seedEntries.length,
+    candidateCount: candidateMap.size,
+    elapsedMs: Date.now() - startedAt,
+  });
 
   return {
     seeds,
