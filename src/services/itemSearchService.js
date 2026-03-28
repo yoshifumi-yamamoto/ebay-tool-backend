@@ -285,7 +285,7 @@ async function searchItemsSimple(queryParams) {
   const numericLimit = Number.isFinite(Number(limit)) ? Number(limit) : 200;
   let query = supabase
     .from('items')
-    .select('ebay_item_id, sku, item_title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency, primary_image_url')
+    .select('ebay_item_id, ebay_user_id, sku, item_title, stocking_url, cost_price, estimated_shipping_cost, current_price_value, current_price_currency, primary_image_url')
     .eq('user_id', user_id)
     .order('updated_at', { ascending: false })
     .limit(numericLimit);
@@ -309,7 +309,40 @@ async function searchItemsSimple(queryParams) {
     throw new Error(`Error fetching items: ${error.message}`);
   }
 
-  return { items: data || [] };
+  const rows = Array.isArray(data) ? data : [];
+
+  if (ebay_item_id) {
+    const enrichedRows = await Promise.all(
+      rows.map(async (row) => {
+        if (!row?.ebay_item_id || !row?.ebay_user_id) {
+          return row;
+        }
+        try {
+          const refreshToken = await getRefreshTokenByEbayUserId(row.ebay_user_id);
+          const accessToken = await refreshEbayToken(refreshToken);
+          const item = await fetchItemDetails(row.ebay_item_id, accessToken);
+          if (!item) {
+            return row;
+          }
+          const signals = getEbayItemSignals(item, row.ebay_item_id);
+          return {
+            ...row,
+            current_price_value: signals.current_price_value ?? row.current_price_value,
+            current_price_currency: signals.current_price_currency || row.current_price_currency,
+            view_item_url: signals.view_item_url || null,
+            site_code: signals.site_code || null,
+            is_us_listing: signals.is_us_listing,
+          };
+        } catch (apiError) {
+          console.warn('[item-search] failed to enrich item via eBay API:', row.ebay_item_id, apiError.message);
+          return row;
+        }
+      })
+    );
+    return { items: enrichedRows };
+  }
+
+  return { items: rows };
 }
 
 const normalizeSearchText = (value) => String(value || '')
@@ -468,6 +501,34 @@ const normalizeEbayViewUrlToUs = (url, itemId) => {
   }
 };
 
+const getTextValue = (value) => {
+  if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, '_')) {
+    return value._;
+  }
+  return value ?? null;
+};
+
+const getEbayItemSignals = (item, itemId) => {
+  const currentPrice = item?.StartPrice || item?.SellingStatus?.CurrentPrice || null;
+  const currentPriceValue = getTextValue(currentPrice);
+  const currentPriceCurrency = currentPrice?.$?.currencyID || null;
+  const siteCode = getTextValue(item?.Site);
+  const rawViewItemUrl =
+    getTextValue(item?.ListingDetails?.ViewItemURL) ||
+    getTextValue(item?.ListingDetails?.ViewItemURLForNaturalSearch) ||
+    null;
+  const normalizedViewItemUrl = normalizeEbayViewUrlToUs(rawViewItemUrl, itemId);
+  const isUsListing = String(siteCode || '').toUpperCase() === 'US' && String(currentPriceCurrency || '').toUpperCase() === 'USD';
+
+  return {
+    site_code: siteCode || null,
+    current_price_value: currentPriceValue,
+    current_price_currency: currentPriceCurrency,
+    view_item_url: normalizedViewItemUrl,
+    is_us_listing: isUsListing,
+  };
+};
+
 const titleMatchesTokens = (title, tokens) => {
   const normalized = normalizeSearchText(title);
   return tokens.every((token) => normalized.includes(token));
@@ -597,10 +658,7 @@ async function fetchDirectEbayItemCandidate(account, itemId) {
   const rawPictures = item?.PictureDetails?.PictureURL;
   const primaryImage = Array.isArray(rawPictures) ? rawPictures[0] : rawPictures || null;
   const sku = item?.SKU || null;
-  const viewItemUrl = normalizeEbayViewUrlToUs(
-    item?.ListingDetails?.ViewItemURL || item?.ListingDetails?.ViewItemURLForNaturalSearch || null,
-    itemId
-  );
+  const signals = getEbayItemSignals(item, itemId);
 
   return {
     ebay_item_id: itemId,
@@ -610,12 +668,14 @@ async function fetchDirectEbayItemCandidate(account, itemId) {
     stocking_url: null,
     cost_price: null,
     estimated_shipping_cost: null,
-    current_price_value: null,
-    current_price_currency: null,
+    current_price_value: signals.current_price_value,
+    current_price_currency: signals.current_price_currency,
     primary_image_url: primaryImage,
     updated_at: null,
-    supplier_url: looksLikeUrl(sku) ? sku : viewItemUrl,
-    view_item_url: viewItemUrl,
+    supplier_url: looksLikeUrl(sku) ? sku : (signals.is_us_listing ? signals.view_item_url : null),
+    view_item_url: signals.view_item_url,
+    site_code: signals.site_code,
+    is_us_listing: signals.is_us_listing,
   };
 }
 
