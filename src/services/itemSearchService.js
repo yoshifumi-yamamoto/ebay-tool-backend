@@ -660,6 +660,10 @@ async function fetchSellerListingsByTitle(account, seedTitle, maxPages = 20) {
     items.forEach((item) => {
       const title = item?.Title || null;
       if (!titleMatchesTokens(title, tokens)) return;
+      const currentPrice = item?.StartPrice || item?.SellingStatus?.CurrentPrice || null;
+      const currentPriceValue = getTextValue(currentPrice);
+      const currentPriceCurrency = currentPrice?.$?.currencyID || null;
+      const siteCode = getTextValue(item?.Site);
       matches.push({
         legacyItemId: item?.ItemID || null,
         item_title: title,
@@ -667,6 +671,12 @@ async function fetchSellerListingsByTitle(account, seedTitle, maxPages = 20) {
         primary_image_url: Array.isArray(item?.PictureDetails?.PictureURL)
           ? item.PictureDetails.PictureURL[0]
           : item?.PictureDetails?.PictureURL || null,
+        current_price_value: currentPriceValue,
+        current_price_currency: currentPriceCurrency,
+        site_code: siteCode || null,
+        is_us_listing:
+          String(siteCode || '').toUpperCase() === 'US' &&
+          String(currentPriceCurrency || '').toUpperCase() === 'USD',
         view_item_url: normalizeEbayViewUrlToUs(
           item?.ListingDetails?.ViewItemURL || item?.ListingDetails?.ViewItemURLForNaturalSearch || null,
           item?.ItemID || null
@@ -863,6 +873,76 @@ async function searchSupplierCandidates(queryParams) {
   };
 
   for (const seed of seeds.slice(0, 3)) {
+    try {
+      const sellerListings = await fetchSellerListingsByTitle(account, seed.title);
+      sellerListings.forEach((listing) => {
+        if (itemId && String(listing.legacyItemId || '') === String(itemId)) {
+          return;
+        }
+        if (!listing.is_us_listing) {
+          return;
+        }
+        pushCandidate({
+          ebay_item_id: listing.legacyItemId || null,
+          ebay_user_id: account,
+          sku: listing.sku || null,
+          item_title: listing.item_title || null,
+          stocking_url: null,
+          cost_price: null,
+          estimated_shipping_cost: null,
+          current_price_value: listing.current_price_value ?? null,
+          current_price_currency: listing.current_price_currency ?? null,
+          primary_image_url: listing.primary_image_url || null,
+          updated_at: null,
+          supplier_url: listing.view_item_url || null,
+          site_code: listing.site_code || null,
+          is_us_listing: true,
+        }, seed.title, `${seed.source}_seller_list_us`);
+      });
+    } catch (error) {
+      console.warn('[item-search] failed to search seller listings fallback:', error.message);
+    }
+
+    try {
+      const activeListings = await fetchEbayListingSeeds(account, seed.title);
+      activeListings.forEach((listing) => {
+        if (itemId && String(listing.legacyItemId || '') === String(itemId)) {
+          return;
+        }
+        if (!(listing.current_price_currency || '').toUpperCase().includes('USD')) {
+          return;
+        }
+        if (String(listing.site_code || '').toUpperCase() !== 'US') {
+          return;
+        }
+        pushCandidate({
+          ebay_item_id: listing.legacyItemId || null,
+          ebay_user_id: account,
+          sku: listing.sku || null,
+          item_title: listing.item_title || null,
+          stocking_url: null,
+          cost_price: null,
+          estimated_shipping_cost: null,
+          current_price_value: listing.current_price_value ?? null,
+          current_price_currency: listing.current_price_currency ?? null,
+          primary_image_url: listing.primary_image_url || null,
+          updated_at: null,
+          supplier_url: normalizeEbayViewUrlToUs(listing.view_item_url || null, listing.legacyItemId || null),
+          site_code: listing.site_code || null,
+          is_us_listing: true,
+        }, seed.title, `${seed.source}_active_list_us`);
+      });
+    } catch (error) {
+      console.warn('[item-search] failed to search active listings fallback:', error.message);
+    }
+
+    if (candidateMap.size >= numericLimit) {
+      return {
+        seeds,
+        candidates: Array.from(candidateMap.values()).slice(0, numericLimit),
+      };
+    }
+
     try {
       const usListings = await searchUsMarketplaceByTitle(seed.title, Math.min(numericLimit, 10));
       usListings.forEach((item) => {
