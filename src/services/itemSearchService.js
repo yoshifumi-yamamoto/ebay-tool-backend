@@ -967,6 +967,40 @@ async function searchHistoricalUsItemsByTitle({ userId, account, seedTitle, excl
   return (data || []).filter((item) => titleMatchesTokens(item.item_title, tokens));
 }
 
+async function enrichHistoricalItemsWithImages(account, items) {
+  const rows = Array.isArray(items) ? items : [];
+  const missingImageRows = rows.filter((item) => !item?.primary_image_url && item?.ebay_item_id).slice(0, 5);
+  if (missingImageRows.length === 0) {
+    return rows;
+  }
+
+  const refreshToken = await getRefreshTokenByEbayUserId(account);
+  const accessToken = await refreshEbayToken(refreshToken);
+  const imageMap = new Map();
+
+  await Promise.all(missingImageRows.map(async (item) => {
+    try {
+      const ebayItem = await fetchItemDetails(item.ebay_item_id, accessToken);
+      const rawPictures = ebayItem?.PictureDetails?.PictureURL;
+      const primaryImage = Array.isArray(rawPictures) ? rawPictures[0] : rawPictures || null;
+      if (primaryImage) {
+        imageMap.set(String(item.ebay_item_id), primaryImage);
+      }
+    } catch (error) {
+      console.warn('[item-search] failed to enrich historical item image:', {
+        account,
+        ebayItemId: item.ebay_item_id,
+        error: error.message,
+      });
+    }
+  }));
+
+  return rows.map((item) => ({
+    ...item,
+    primary_image_url: item.primary_image_url || imageMap.get(String(item.ebay_item_id)) || null,
+  }));
+}
+
 async function searchItemIdSupplierCandidates({ userId, account, itemId, seeds, numericLimit }) {
   const startedAt = Date.now();
   const candidateMap = new Map();
@@ -1071,8 +1105,9 @@ async function searchItemIdSupplierCandidates({ userId, account, itemId, seeds, 
       });
       return [];
     });
+    const enrichedHistoricalListings = await enrichHistoricalItemsWithImages(account, historicalListings);
     const historicalElapsedMs = Date.now() - historicalStartedAt;
-    historicalListings.forEach((item) => {
+    enrichedHistoricalListings.forEach((item) => {
       pushCandidate({
         ...item,
         supplier_url: item.stocking_url || (looksLikeUrl(item.sku) ? item.sku : buildUsEbayItemUrl(item.ebay_item_id)),
@@ -1089,7 +1124,7 @@ async function searchItemIdSupplierCandidates({ userId, account, itemId, seeds, 
       seedSource: seed.source,
       seedTitle: seed.title,
       marketplaceListingsCount: marketplaceListings.length,
-      historicalListingsCount: historicalListings.length,
+      historicalListingsCount: enrichedHistoricalListings.length,
       addedCandidates: addedCount,
       candidateTotal: candidateMap.size,
       elapsedMs: Date.now() - seedStartedAt,
