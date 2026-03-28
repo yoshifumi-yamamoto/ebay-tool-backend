@@ -576,20 +576,22 @@ async function getEbayBrowseApplicationToken() {
 }
 
 const buildMarketplaceSearchQueries = (seedTitle) => {
-  const searchTokens = extractSearchTokens(seedTitle);
-  if (searchTokens.length === 0) {
-    return [];
-  }
-
   const queries = [];
   const pushQuery = (tokens) => {
-    const normalizedTokens = (tokens || []).filter(Boolean);
+    const normalizedTokens = Array.isArray(tokens) ? tokens.filter(Boolean) : [String(tokens || '').trim()].filter(Boolean);
     if (normalizedTokens.length === 0) return;
     const query = normalizedTokens.join(' ').trim();
     if (!query) return;
     if (queries.includes(query)) return;
     queries.push(query);
   };
+
+  pushQuery(String(seedTitle || '').trim());
+
+  const searchTokens = extractSearchTokens(seedTitle);
+  if (searchTokens.length === 0) {
+    return queries;
+  }
 
   pushQuery(searchTokens.slice(0, 5));
   pushQuery(searchTokens.slice(0, 4));
