@@ -559,6 +559,16 @@ function normalizeOrderLineItem(item = {}) {
         item.stockingStatus ??
         null
     );
+    const normalizedProcurementEntries = normalizeProcurementEntries(
+        item.procurement_entries ??
+        item.procurementEntries ??
+        null,
+        {
+            fallbackUrl: item.procurement_url ?? item.stocking_url ?? null,
+            fallbackTrackingNumber: item.procurement_tracking_number ?? item.procurementTrackingNumber ?? null,
+        }
+    );
+    const primaryProcurementEntry = normalizedProcurementEntries[0] || null;
 
     return {
         ...item,
@@ -574,13 +584,16 @@ function normalizeOrderLineItem(item = {}) {
         line_item_cost_currency: lineItemCostCurrency,
         itemImage: item.itemImage ?? item.item_image ?? null,
         item_image: item.item_image ?? item.itemImage ?? null,
-        procurement_tracking_number: item.procurement_tracking_number ?? item.procurementTrackingNumber ?? null,
-        procurementTrackingNumber: item.procurementTrackingNumber ?? item.procurement_tracking_number ?? null,
+        procurement_tracking_number: primaryProcurementEntry?.tracking_number ?? item.procurement_tracking_number ?? item.procurementTrackingNumber ?? null,
+        procurementTrackingNumber: primaryProcurementEntry?.tracking_number ?? item.procurementTrackingNumber ?? item.procurement_tracking_number ?? null,
         procurement_site_name: item.procurement_site_name ?? item.procurementSiteName ?? null,
         procurementSiteName: item.procurementSiteName ?? item.procurement_site_name ?? null,
         procurement_status: normalizedProcurementStatus,
         procurementStatus: normalizedProcurementStatus,
         stocking_status: normalizedProcurementStatus,
+        procurement_entries: normalizedProcurementEntries,
+        procurementEntries: normalizedProcurementEntries,
+        procurement_url: primaryProcurementEntry?.url ?? item.procurement_url ?? null,
         cost_price: item.cost_price ?? item.costPrice ?? null,
         stocking_url: item.stocking_url ?? item.stockingUrl ?? null,
         researcher: item.researcher ?? null,
@@ -609,6 +622,47 @@ const ensureArray = (value) => {
     }
     return [value];
 };
+
+function normalizeProcurementEntry(entry = {}) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+    const url = typeof entry.url === 'string' ? entry.url.trim() : '';
+    const trackingNumber = typeof entry.tracking_number === 'string'
+        ? entry.tracking_number.trim()
+        : typeof entry.trackingNumber === 'string'
+            ? entry.trackingNumber.trim()
+            : '';
+    const note = typeof entry.note === 'string' ? entry.note.trim() : '';
+    if (!url && !trackingNumber && !note) {
+        return null;
+    }
+    return {
+        id: typeof entry.id === 'string' && entry.id.trim()
+            ? entry.id.trim()
+            : `proc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        url: url || null,
+        tracking_number: trackingNumber || null,
+        note: note || null,
+    };
+}
+
+function normalizeProcurementEntries(entries, { fallbackUrl = null, fallbackTrackingNumber = null } = {}) {
+    const sourceEntries = Array.isArray(entries) ? entries : [];
+    const normalized = sourceEntries
+        .map(normalizeProcurementEntry)
+        .filter(Boolean);
+
+    if (normalized.length > 0) {
+        return normalized;
+    }
+
+    const fallback = normalizeProcurementEntry({
+        url: fallbackUrl,
+        tracking_number: fallbackTrackingNumber,
+    });
+    return fallback ? [fallback] : [];
+}
 
 const extractTrackingFromShippingStep = (shippingStep = {}) => {
     if (!shippingStep || typeof shippingStep !== 'object') {
@@ -709,7 +763,7 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
     const lineItemIds = lineItems.map((item) => item.lineItemId);
     const { data: existingLineItems, error: fetchError } = await supabase
         .from('order_line_items')
-        .select('id, procurement_tracking_number, procurement_url, procurement_status, procurement_ordered_at, cost_price, researcher, item_image, stocking_url, total_value, total_currency, line_item_cost_value, line_item_cost_currency, quantity')
+        .select('id, procurement_tracking_number, procurement_url, procurement_entries, procurement_status, procurement_ordered_at, cost_price, researcher, item_image, stocking_url, total_value, total_currency, line_item_cost_value, line_item_cost_currency, quantity')
         .in('id', lineItemIds);
 
     if (fetchError && fetchError.code !== 'PGRST116') {
@@ -734,6 +788,11 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
         const existingStatus = normalizeProcurementStatusValue(existing.procurement_status);
         const incomingStatus = normalizeProcurementStatusValue(item.procurement_status ?? item.procurementStatus ?? item.stocking_status ?? item.stockingStatus ?? null);
         const procurementStatus = incomingStatus ?? existingStatus ?? 'NEW';
+        const procurementEntries = normalizeProcurementEntries(existing.procurement_entries, {
+            fallbackUrl: existing.procurement_url || item.stocking_url || null,
+            fallbackTrackingNumber: existing.procurement_tracking_number || null,
+        });
+        const primaryProcurementEntry = procurementEntries[0] || null;
         let procurementOrderedAt = existing.procurement_ordered_at || null;
         if (shouldTrackProcurementOrderedAt(procurementStatus)) {
             procurementOrderedAt = procurementOrderedAt || new Date().toISOString();
@@ -755,8 +814,9 @@ async function upsertOrderLineItems(order, lineItems, researcher) {
             stocking_url: item.stocking_url || existing.stocking_url || null,
             researcher: researcher || item.researcher || existing.researcher || null,
             quantity: toNumber(item.quantity) ?? existing.quantity ?? null,
-            procurement_tracking_number: existing.procurement_tracking_number || null,
-            procurement_url: existing.procurement_url || item.stocking_url || null,
+            procurement_tracking_number: primaryProcurementEntry?.tracking_number || null,
+            procurement_url: primaryProcurementEntry?.url || item.stocking_url || null,
+            procurement_entries: procurementEntries,
             procurement_status: procurementStatus,
             procurement_ordered_at: procurementOrderedAt,
             updated_at: new Date().toISOString()
@@ -821,10 +881,15 @@ async function updateProcurementStatus(lineItemId, status) {
  * @param {string|null} trackingNumber - 追跡番号
  */
 async function updateProcurementTrackingNumber(lineItemId, trackingNumber) {
+    const normalizedEntries = normalizeProcurementEntries(null, {
+        fallbackTrackingNumber: trackingNumber,
+    });
+    const primaryProcurementEntry = normalizedEntries[0] || null;
     const { data, error } = await supabase
         .from('order_line_items')
         .update({
-            procurement_tracking_number: trackingNumber,
+            procurement_tracking_number: primaryProcurementEntry?.tracking_number || null,
+            procurement_entries: normalizedEntries,
             updated_at: new Date().toISOString()
         })
         .eq('id', lineItemId)
@@ -832,6 +897,27 @@ async function updateProcurementTrackingNumber(lineItemId, trackingNumber) {
 
     if (error) {
         throw new Error('Failed to update procurement tracking number: ' + error.message);
+    }
+
+    return data?.[0] || null;
+}
+
+async function updateProcurementEntries(lineItemId, procurementEntries) {
+    const normalizedEntries = normalizeProcurementEntries(procurementEntries);
+    const primaryProcurementEntry = normalizedEntries[0] || null;
+    const { data, error } = await supabase
+        .from('order_line_items')
+        .update({
+            procurement_entries: normalizedEntries,
+            procurement_tracking_number: primaryProcurementEntry?.tracking_number || null,
+            procurement_url: primaryProcurementEntry?.url || null,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', lineItemId)
+        .select();
+
+    if (error) {
+        throw new Error('Failed to update procurement entries: ' + error.message);
     }
 
     return data?.[0] || null;
@@ -1950,6 +2036,16 @@ async function updateOrder(orderId, orderData) {
                 if (normalized.procurement_tracking_number !== undefined) {
                     fields.procurement_tracking_number = normalized.procurement_tracking_number || null;
                 }
+                if (normalized.procurement_entries !== undefined) {
+                    const normalizedEntries = normalizeProcurementEntries(normalized.procurement_entries, {
+                        fallbackUrl: normalized.procurement_url ?? normalized.stocking_url ?? null,
+                        fallbackTrackingNumber: normalized.procurement_tracking_number ?? null,
+                    });
+                    const primaryProcurementEntry = normalizedEntries[0] || null;
+                    fields.procurement_entries = normalizedEntries;
+                    fields.procurement_tracking_number = primaryProcurementEntry?.tracking_number || null;
+                    fields.procurement_url = primaryProcurementEntry?.url || null;
+                }
                 if (normalized.procurement_site_name !== undefined) {
                     fields.procurement_site_name = normalized.procurement_site_name || null;
                 }
@@ -2302,6 +2398,7 @@ module.exports = {
     getProcurementAlertCandidates,
     updateProcurementStatus,
     updateProcurementTrackingNumber,
+    updateProcurementEntries,
     markOrdersAsShipped,
     normalizeOrderLineItem,
     attachNormalizedLineItemsToOrder,

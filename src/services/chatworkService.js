@@ -76,36 +76,167 @@ const formatDateLabel = (value) => {
     return `${year}-${month}-${day}`;
 };
 
+const STATUS_GROUP_CONFIG = {
+    STOCKED_SHIPPED: {
+        heading: '■ 配送確認が必要',
+        reason: '発送期限が近い注文です。配送状況を確認してください。',
+        supplierFromUrl: true,
+        sortOrder: 0,
+    },
+    ORDERED: {
+        heading: '■ 発送確認が必要',
+        reason: '発注から3日経過しています。発送状況を確認してください。',
+        supplierFromUrl: true,
+        sortOrder: 1,
+    },
+    OUTOFSTOCK: {
+        heading: '■ 欠品確認が必要',
+        reason: '注文から3日経過しています。在庫状況を確認してください。',
+        supplierFromUrl: false,
+        sortOrder: 2,
+    },
+    NEW: {
+        heading: '■ 仕入確認が必要',
+        reason: '注文から3日経過しています。仕入れを行ってください。',
+        supplierFromUrl: false,
+        sortOrder: 3,
+    },
+};
+
+function detectSupplierNameFromUrl(url) {
+    if (!url || typeof url !== 'string') {
+        return null;
+    }
+    let hostname = '';
+    try {
+        hostname = new URL(url).hostname.toLowerCase();
+    } catch (_error) {
+        return null;
+    }
+
+    if (hostname.includes('mercari.com')) return 'メルカリ';
+    if (hostname.includes('paypayfleamarket.yahoo.co.jp')) return 'Yahooフリマ';
+    if (hostname.includes('auctions.yahoo.co.jp') || hostname.includes('page.auctions.yahoo.co.jp')) return 'ヤフオク';
+    if (hostname.includes('rakuten')) return '楽天';
+    if (hostname.includes('amazon')) return 'Amazon';
+    if (hostname.includes('suruga-ya')) return '駿河屋';
+    if (hostname.includes('geo-online')) return 'ゲオ';
+    if (hostname.includes('bookoffonline')) return 'ブックオフ';
+    if (hostname.includes('paypaymall')) return 'PayPayモール';
+    return hostname.replace(/^www\./, '') || null;
+}
+
+function getProcurementEntries(lineItem = {}) {
+    if (Array.isArray(lineItem.procurement_entries) && lineItem.procurement_entries.length > 0) {
+        return lineItem.procurement_entries;
+    }
+    if (Array.isArray(lineItem.procurementEntries) && lineItem.procurementEntries.length > 0) {
+        return lineItem.procurementEntries;
+    }
+    const fallbackUrl = lineItem.procurement_url || lineItem.stocking_url || null;
+    if (!fallbackUrl) return [];
+    return [{ url: fallbackUrl }];
+}
+
+function resolveSupplierGroupLabel(lineItem, status) {
+    const config = STATUS_GROUP_CONFIG[status];
+    if (!config?.supplierFromUrl) {
+        return '仕入れ先不明';
+    }
+    const supplierNames = Array.from(
+        new Set(
+            getProcurementEntries(lineItem)
+                .map((entry) => detectSupplierNameFromUrl(entry?.url))
+                .filter(Boolean)
+        )
+    );
+    if (supplierNames.length === 0) {
+        return '仕入れ先不明';
+    }
+    if (supplierNames.length === 1) {
+        return supplierNames[0];
+    }
+    return '複数';
+}
+
+function buildProcurementAlertMessage(alerts) {
+    const header = '[toall]\n【要対応注文通知】\n\n';
+    const sections = new Map();
+
+    alerts.forEach((alert) => {
+        (alert.lineItems || []).forEach((lineItem) => {
+            const status = lineItem.currentStatus;
+            const config = STATUS_GROUP_CONFIG[status];
+            if (!config) return;
+            const supplierLabel = resolveSupplierGroupLabel(lineItem, status);
+            const sectionKey = status;
+            if (!sections.has(sectionKey)) {
+                sections.set(sectionKey, {
+                    ...config,
+                    suppliers: new Map(),
+                });
+            }
+            const section = sections.get(sectionKey);
+            if (!section.suppliers.has(supplierLabel)) {
+                section.suppliers.set(supplierLabel, new Map());
+            }
+            const supplierBucket = section.suppliers.get(supplierLabel);
+            const orderKey = `${alert.orderNo}::${alert.ebayUserId || '-'}`;
+            if (!supplierBucket.has(orderKey)) {
+                supplierBucket.set(orderKey, {
+                    orderNo: alert.orderNo,
+                    ebayUserId: alert.ebayUserId || '-',
+                    details: [],
+                });
+            }
+            const orderEntry = supplierBucket.get(orderKey);
+            if (lineItem.currentStatusLabel && !orderEntry.details.includes(lineItem.currentStatusLabel)) {
+                orderEntry.details.push(lineItem.currentStatusLabel);
+            }
+        });
+    });
+
+    const orderedSections = Array.from(sections.entries())
+        .sort(([, a], [, b]) => a.sortOrder - b.sortOrder)
+        .map(([, value]) => value);
+
+    let body = header;
+    orderedSections.forEach((section, sectionIndex) => {
+        if (sectionIndex > 0) body += '\n';
+        const supplierCount = Array.from(section.suppliers.values()).reduce((sum, bucket) => sum + bucket.size, 0);
+        body += `${section.heading}（${supplierCount}件）\n${section.reason}\n\n`;
+
+        const orderedSuppliers = Array.from(section.suppliers.entries())
+            .sort(([a], [b]) => a.localeCompare(b, 'ja'));
+
+        orderedSuppliers.forEach(([supplierLabel, ordersMap], supplierIndex) => {
+            if (supplierIndex > 0) body += '\n';
+            body += `[${supplierLabel}] ${ordersMap.size}件\n`;
+            Array.from(ordersMap.values())
+                .sort((a, b) => String(a.orderNo).localeCompare(String(b.orderNo), 'en'))
+                .forEach((entry) => {
+                    const detailText = entry.details.length > 1
+                        ? ` | 明細: ${entry.details.join(', ')}`
+                        : '';
+                    body += `・${entry.orderNo} | ${entry.ebayUserId}${detailText}\n`;
+                });
+        });
+    });
+
+    return body.trim();
+}
+
 async function sendProcurementAlertSummary(userId, token, roomId) {
     const alerts = await orderService.getProcurementAlertCandidates(userId);
     if (!alerts.length) {
         return { sent: false, alertCount: 0 };
     }
 
-    const header = '[toall]\n仕入れアラートを共有します。\n発送期限までの仕入れ遅延リスクがある注文です。\n\n';
     const maxBodyLength = 9000;
-    const lines = [];
-    let omittedCount = 0;
+    let messageBody = buildProcurementAlertMessage(alerts);
 
-    alerts.forEach((alert) => {
-        const reasonText = (alert.lineItems || [])
-            .map((item) => item.reason)
-            .filter(Boolean)[0] || '-';
-        const statuses = (alert.lineItems || [])
-            .map((item) => item.currentStatusLabel)
-            .filter(Boolean)
-            .join(',');
-        const line = `・注文番号:${alert.orderNo} / アカウント:${alert.ebayUserId || '-'} / 状態:${statuses || '-'} / ${reasonText}\n`;
-        if ((header.length + lines.join('').length + line.length) <= maxBodyLength) {
-            lines.push(line);
-        } else {
-            omittedCount += 1;
-        }
-    });
-
-    let messageBody = header + lines.join('');
-    if (omittedCount > 0) {
-        messageBody += `\nほか ${omittedCount} 件あります。詳細はBayworkで確認してください。`;
+    if (messageBody.length > maxBodyLength) {
+        messageBody = `${messageBody.slice(0, maxBodyLength - 40)}\n\n詳細はBayworkで確認してください。`;
     }
 
     await sendChatworkMessage(token, roomId, messageBody.trim());

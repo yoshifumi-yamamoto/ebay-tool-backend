@@ -80,6 +80,35 @@ exports.updateProcurementTrackingNumber = async (req, res) => {
     }
 };
 
+exports.updateProcurementEntries = async (req, res) => {
+    const { lineItemId } = req.params;
+    const { procurementEntries } = req.body || {};
+
+    if (!Array.isArray(procurementEntries)) {
+        return res.status(400).json({ error: 'procurementEntries must be an array' });
+    }
+
+    try {
+        const updated = await orderService.updateProcurementEntries(lineItemId, procurementEntries);
+        if (!updated) {
+            return res.status(404).json({ error: 'Order line item not found' });
+        }
+        res.json(updated);
+    } catch (error) {
+        console.error('Failed to update procurement entries:', error);
+        await logSystemError({
+            error_code: 'PROCUREMENT_ENTRIES_UPDATE_FAILED',
+            category: 'DB',
+            severity: 'ERROR',
+            provider: 'supabase',
+            message: error.message,
+            retryable: false,
+            payload_summary: { lineItemId },
+        });
+        res.status(500).json({ error: error.message });
+    }
+};
+
 exports.uploadTrackingInfo = async (req, res) => {
     const { orderNo } = req.params;
     const {
