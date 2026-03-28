@@ -339,7 +339,7 @@ async function searchItemsSimple(queryParams) {
         }
       })
     );
-    return { items: enrichedRows };
+    return { items: enrichedRows.filter((row) => row?.is_us_listing === true) };
   }
 
   return { items: rows };
@@ -876,6 +876,15 @@ async function searchSupplierCandidates(queryParams) {
     } catch (error) {
       console.warn('[item-search] failed to search EBAY-US marketplace:', error.message);
     }
+  }
+
+  if (itemId) {
+    return {
+      seeds,
+      candidates: Array.from(candidateMap.values())
+        .filter((item) => item?.is_us_listing === true || String(item?.site_code || '').toUpperCase() === 'US')
+        .slice(0, numericLimit),
+    };
   }
 
   for (const seed of seeds) {
