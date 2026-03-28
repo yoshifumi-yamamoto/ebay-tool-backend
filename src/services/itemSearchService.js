@@ -534,51 +534,101 @@ const titleMatchesTokens = (title, tokens) => {
   return tokens.every((token) => normalized.includes(token));
 };
 
+const buildMarketplaceSearchQueries = (seedTitle) => {
+  const searchTokens = extractSearchTokens(seedTitle);
+  if (searchTokens.length === 0) {
+    return [];
+  }
+
+  const queries = [];
+  const pushQuery = (tokens) => {
+    const normalizedTokens = (tokens || []).filter(Boolean);
+    if (normalizedTokens.length === 0) return;
+    const query = normalizedTokens.join(' ').trim();
+    if (!query) return;
+    if (queries.includes(query)) return;
+    queries.push(query);
+  };
+
+  pushQuery(searchTokens.slice(0, 5));
+  pushQuery(searchTokens.slice(0, 4));
+  pushQuery(searchTokens.slice(0, 3));
+
+  const modelTokens = searchTokens.filter((token) => /\d/.test(token) || token.includes('-'));
+  pushQuery(modelTokens.slice(0, 3));
+  pushQuery([searchTokens[0], ...modelTokens.slice(0, 2)]);
+
+  return queries.slice(0, 5);
+};
+
 async function searchUsMarketplaceByTitle(seedTitle, limit = 10) {
   const keywords = String(seedTitle || '').trim();
   if (!keywords) return [];
   const searchTokens = extractSearchTokens(keywords);
   if (searchTokens.length === 0) return [];
-  const queryText = searchTokens.slice(0, 5).join(' ');
+  const queryCandidates = buildMarketplaceSearchQueries(keywords);
+  let lastError = null;
 
-  const response = await axios.get('https://svcs.ebay.com/services/search/FindingService/v1', {
-    params: {
-      'OPERATION-NAME': 'findItemsByKeywords',
-      'SERVICE-VERSION': '1.13.0',
-      'SECURITY-APPNAME': process.env.EBAY_APP_ID,
-      'RESPONSE-DATA-FORMAT': 'JSON',
-      'REST-PAYLOAD': true,
-      'GLOBAL-ID': 'EBAY-US',
-      keywords: queryText,
-      'paginationInput.entriesPerPage': String(Math.max(limit * 5, 50)),
-      'itemFilter(0).name': 'ListingType',
-      'itemFilter(0).value(0)': 'FixedPrice',
-    },
-    timeout: 15000,
-  });
+  for (const queryText of queryCandidates) {
+    try {
+      const response = await axios.get('https://svcs.ebay.com/services/search/FindingService/v1', {
+        params: {
+          'OPERATION-NAME': 'findItemsByKeywords',
+          'SERVICE-VERSION': '1.13.0',
+          'SECURITY-APPNAME': process.env.EBAY_APP_ID,
+          'RESPONSE-DATA-FORMAT': 'JSON',
+          'REST-PAYLOAD': true,
+          'GLOBAL-ID': 'EBAY-US',
+          keywords: queryText,
+          'paginationInput.entriesPerPage': String(Math.max(limit * 5, 50)),
+          'itemFilter(0).name': 'ListingType',
+          'itemFilter(0).value(0)': 'FixedPrice',
+        },
+        timeout: 8000,
+      });
 
-  const items =
-    response?.data?.findItemsByKeywordsResponse?.[0]?.searchResult?.[0]?.item || [];
+      const items =
+        response?.data?.findItemsByKeywordsResponse?.[0]?.searchResult?.[0]?.item || [];
 
-  return (Array.isArray(items) ? items : [])
-    .map((item) => ({
-      ebay_item_id: item?.itemId?.[0] || null,
-      ebay_user_id: 'EBAY_US',
-      sku: null,
-      item_title: item?.title?.[0] || null,
-      stocking_url: null,
-      cost_price: null,
-      estimated_shipping_cost: null,
-      current_price_value: item?.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || null,
-      current_price_currency: item?.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'] || null,
-      primary_image_url: item?.galleryURL?.[0] || null,
-      updated_at: null,
-      supplier_url: item?.viewItemURL?.[0] || null,
-      site_code: 'US',
-      is_us_listing: String(item?.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'] || '').toUpperCase() === 'USD',
-    }))
-    .filter((item) => item.is_us_listing && titleMatchesTokens(item.item_title, searchTokens))
-    .slice(0, limit);
+      const normalizedItems = (Array.isArray(items) ? items : [])
+        .map((item) => ({
+          ebay_item_id: item?.itemId?.[0] || null,
+          ebay_user_id: 'EBAY_US',
+          sku: null,
+          item_title: item?.title?.[0] || null,
+          stocking_url: null,
+          cost_price: null,
+          estimated_shipping_cost: null,
+          current_price_value: item?.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || null,
+          current_price_currency: item?.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'] || null,
+          primary_image_url: item?.galleryURL?.[0] || null,
+          updated_at: null,
+          supplier_url: item?.viewItemURL?.[0] || null,
+          site_code: 'US',
+          is_us_listing: String(item?.sellingStatus?.[0]?.currentPrice?.[0]?.['@currencyId'] || '').toUpperCase() === 'USD',
+        }))
+        .filter((item) => item.is_us_listing && titleMatchesTokens(item.item_title, searchTokens))
+        .slice(0, limit);
+
+      if (normalizedItems.length > 0) {
+        return normalizedItems;
+      }
+    } catch (error) {
+      lastError = error;
+      console.warn('[item-search] marketplace query failed', {
+        queryText,
+        message: error.message,
+        status: error.response?.status || null,
+        response: error.response?.data || null,
+      });
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return [];
 }
 
 async function fetchEbayListingSeedsWithAccessToken(accessToken, seedTitle, maxPages = 30) {
