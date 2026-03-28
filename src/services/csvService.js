@@ -626,6 +626,69 @@ async function upsertCarrierInvoice(payload) {
     return data?.id;
 }
 
+function normalizeCarrierName(value) {
+    const upper = String(value || '').trim().toUpperCase();
+    if (upper === 'FEDEX' || upper === 'FED EX' || upper === 'FEDEX EXPRESS') return 'FEDEX';
+    if (upper === 'DHL' || upper === 'DHL EXPRESS') return 'DHL';
+    return upper;
+}
+
+function normalizeInvoiceStatus(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (['pending', 'imported', 'failed', 'skipped'].includes(normalized)) {
+        return normalized;
+    }
+    return 'pending';
+}
+
+async function registerCarrierInvoiceFromEmail(payload = {}) {
+    const carrier = normalizeCarrierName(payload.carrier);
+    const invoiceNumber = String(payload.invoice_number || '').trim();
+    if (!carrier || !['DHL', 'FEDEX'].includes(carrier)) {
+        throw new Error('carrier must be DHL or FEDEX');
+    }
+    if (!invoiceNumber) {
+        throw new Error('invoice_number is required');
+    }
+
+    const row = {
+        carrier,
+        invoice_number: invoiceNumber,
+        invoice_date: normalizeDate(payload.invoice_date),
+        due_date: normalizeDate(payload.due_date),
+        invoice_total_amount: normalizeAmount(payload.invoice_total_amount),
+        currency: String(payload.currency || '').trim() || null,
+        billing_account: String(payload.billing_account || '').trim() || null,
+        source_file_name: String(payload.source_file_name || '').trim() || null,
+        source_message_id: String(payload.source_message_id || '').trim() || null,
+        status: normalizeInvoiceStatus(payload.status || 'pending'),
+        error_message: String(payload.error_message || '').trim() || null,
+        raw_payload: payload.raw_payload || null,
+        updated_at: new Date().toISOString(),
+    };
+
+    if (row.status === 'imported') {
+        const importedAt = payload.imported_at || new Date().toISOString();
+        row.imported_at = importedAt;
+        row.last_imported_at = payload.last_imported_at || importedAt;
+        row.import_run_id = payload.import_run_id || randomUUID();
+    } else {
+        row.imported_at = payload.imported_at || null;
+        row.last_imported_at = payload.last_imported_at || null;
+        row.import_run_id = payload.import_run_id || null;
+    }
+
+    const { data, error } = await supabase
+        .from('carrier_invoices')
+        .upsert(row, { onConflict: 'carrier,invoice_number' })
+        .select('*')
+        .maybeSingle();
+    if (error) {
+        throw new Error(`carrier_invoices upsert from email failed: ${error.message}`);
+    }
+    return data;
+}
+
 async function upsertCarrierShipment(payload) {
     const { data, error } = await supabase
         .from('carrier_shipments')
@@ -1174,6 +1237,11 @@ async function processFedexRows(rows, sourceFileName, options = {}) {
             currency: row['請求通貨'] || null,
             billing_account: row['請求先アカウント・ナンバー'] || null,
             source_file_name: sourceFileName,
+            status: 'imported',
+            imported_at: new Date().toISOString(),
+            last_imported_at: new Date().toISOString(),
+            import_run_id: importRunId,
+            updated_at: new Date().toISOString(),
         });
         const shipmentId = await upsertCarrierShipment({
             invoice_id: invoiceId,
@@ -1350,7 +1418,8 @@ async function processFedexRows(rows, sourceFileName, options = {}) {
     return result;
 }
 
-async function processDhlRows(rows, sourceFileName) {
+async function processDhlRows(rows, sourceFileName, options = {}) {
+    const importRunId = options.importRunId || randomUUID();
     let processed = 0;
     let skippedMissingRequired = 0;
     const grouped = new Map();
@@ -1384,6 +1453,11 @@ async function processDhlRows(rows, sourceFileName) {
             currency: firstRow['Currency'] || null,
             billing_account: firstRow['Billing Account'] || null,
             source_file_name: sourceFileName,
+            status: 'imported',
+            imported_at: new Date().toISOString(),
+            last_imported_at: new Date().toISOString(),
+            import_run_id: importRunId,
+            updated_at: new Date().toISOString(),
         });
         const dhlDimensions = parseDhlDimensions(firstRow['Dimensions']);
         const shipmentId = await upsertCarrierShipment({
@@ -1493,6 +1567,7 @@ async function processDhlRows(rows, sourceFileName) {
     const result = {
         carrier: 'DHL',
         source_file_name: sourceFileName,
+        import_run_id: importRunId,
         total_rows: rows.length,
         processed_shipments: processed,
         skipped_rows_missing_required: skippedMissingRequired,
@@ -1537,7 +1612,9 @@ async function updateCarrierInvoicesFromCSV(fileBuffer, sourceFileName) {
                             labelHeaderCount,
                             amountHeaderCount,
                         })
-                        : await processDhlRows(rows, sourceFileName);
+                        : await processDhlRows(rows, sourceFileName, {
+                            importRunId,
+                        });
                     resolve(result);
                 } catch (error) {
                     reject(error);
@@ -1746,6 +1823,7 @@ module.exports = {
     updateActiveListingsCSV,
     updateShippingCostsFromCSV,
     updateCarrierInvoicesFromCSV,
+    registerCarrierInvoiceFromEmail,
     fetchCarrierInvoiceAnomalies,
     updateCarrierInvoiceAnomalyResolution,
     fetchCarrierInvoiceChargeDetails,

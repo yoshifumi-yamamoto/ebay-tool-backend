@@ -33,6 +33,7 @@ router.post('/upload-carrier-invoices', upload.array('files', 20), (req, res, ne
   console.log('Received files:', req.files);
   next();
 }, csvController.processCarrierInvoicesCSVUpload);
+router.post('/carrier-invoice-email', csvController.upsertCarrierInvoiceEmail);
 
 router.get('/carrier-invoice-anomalies', csvController.getCarrierInvoiceAnomalies);
 router.patch('/carrier-invoice-anomalies/:id/resolve', csvController.patchCarrierInvoiceAnomalyResolution);

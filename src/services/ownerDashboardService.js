@@ -788,7 +788,57 @@ async function fetchTodayMetrics({ userId, fromDay, toDay }) {
   };
 }
 
+async function fetchCarrierInvoiceHistory(filters = {}) {
+  const limit = Number.isFinite(Number(filters.limit)) ? Math.min(Number(filters.limit), 200) : 20;
+  const page = Number.isFinite(Number(filters.page)) ? Math.max(Number(filters.page), 0) : 0;
+  const offset = page * limit;
+  const carrier = filters.carrier ? String(filters.carrier).trim().toUpperCase() : '';
+  const status = filters.status ? String(filters.status).trim().toLowerCase() : '';
+  const query = filters.query ? String(filters.query).trim() : '';
+  const fromDate = filters.from_date || filters.fromDate || '';
+  const toDate = filters.to_date || filters.toDate || '';
+
+  let dbQuery = supabase
+    .from('carrier_invoices')
+    .select(
+      'id, carrier, invoice_number, invoice_date, due_date, invoice_total_amount, currency, billing_account, source_file_name, source_message_id, status, imported_at, last_imported_at, updated_at, created_at',
+      { count: 'exact' }
+    )
+    .order('invoice_date', { ascending: false, nullsFirst: false })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (carrier) dbQuery = dbQuery.eq('carrier', carrier);
+  if (status) dbQuery = dbQuery.eq('status', status);
+  if (fromDate) dbQuery = dbQuery.gte('invoice_date', fromDate);
+  if (toDate) dbQuery = dbQuery.lte('invoice_date', toDate);
+  if (query) dbQuery = dbQuery.or(`invoice_number.ilike.%${query}%,source_file_name.ilike.%${query}%`);
+
+  const { data, error, count } = await dbQuery;
+  if (error) {
+    throw new Error(`failed to fetch carrier invoice history: ${error.message}`);
+  }
+
+  const summary = (data || []).reduce(
+    (acc, row) => {
+      acc.by_status[row.status || 'unknown'] = (acc.by_status[row.status || 'unknown'] || 0) + 1;
+      acc.by_carrier[row.carrier || 'unknown'] = (acc.by_carrier[row.carrier || 'unknown'] || 0) + 1;
+      return acc;
+    },
+    { by_status: {}, by_carrier: {} }
+  );
+
+  return {
+    rows: data || [],
+    total: count || 0,
+    page,
+    limit,
+    summary,
+  };
+}
+
 module.exports = {
   fetchTodayMetrics,
+  fetchCarrierInvoiceHistory,
   ebayDayToUtcRange,
 };

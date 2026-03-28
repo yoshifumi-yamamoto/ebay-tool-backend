@@ -4,6 +4,7 @@ const {
     updateActiveListingsCSV,
     updateShippingCostsFromCSV,
     updateCarrierInvoicesFromCSV,
+    registerCarrierInvoiceFromEmail,
     fetchCarrierInvoiceAnomalies,
     updateCarrierInvoiceAnomalyResolution,
     fetchCarrierInvoiceChargeDetails,
@@ -158,6 +159,34 @@ const processCarrierInvoicesCSVUpload = async (req, res) => {
     }
 };
 
+const upsertCarrierInvoiceEmail = async (req, res) => {
+    const expectedSecret = process.env.CARRIER_MAIL_ROUTER_SECRET;
+    const providedSecret = req.headers['x-carrier-router-secret'];
+
+    if (!expectedSecret) {
+        console.error('CARRIER_MAIL_ROUTER_SECRET is not configured');
+        return res.status(500).json({ error: 'Carrier mail router secret is not configured' });
+    }
+
+    if (!providedSecret || providedSecret !== expectedSecret) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    try {
+        const result = await registerCarrierInvoiceFromEmail(req.body || {});
+        res.status(200).json({ message: 'Carrier invoice email upserted', result });
+    } catch (error) {
+        if (
+            error.message === 'carrier must be DHL or FEDEX' ||
+            error.message === 'invoice_number is required'
+        ) {
+            return res.status(400).json({ error: error.message });
+        }
+        console.error('Error upserting carrier invoice email:', error.message);
+        res.status(500).json({ error: 'Error upserting carrier invoice email' });
+    }
+};
+
 const getCarrierInvoiceAnomalies = async (req, res) => {
     try {
         const result = await fetchCarrierInvoiceAnomalies({
@@ -238,6 +267,7 @@ module.exports = {
     processActiveListingsCSVUpload,
     processShippingCostsCSVUpload,
     processCarrierInvoicesCSVUpload,
+    upsertCarrierInvoiceEmail,
     getCarrierInvoiceAnomalies,
     getCarrierInvoiceChargeDetails,
     getUnknownCarrierChargeEvents,

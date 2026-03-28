@@ -1,4 +1,4 @@
-const { fetchTodayMetrics } = require('../services/ownerDashboardService');
+const { fetchTodayMetrics, fetchCarrierInvoiceHistory } = require('../services/ownerDashboardService');
 
 exports.getTodayMetrics = async (req, res) => {
   const userId = Number(req.query.user_id || req.query.userId);
@@ -15,5 +15,23 @@ exports.getTodayMetrics = async (req, res) => {
   } catch (error) {
     console.error('[ownerDashboard] Failed to fetch today metrics:', error.message);
     return res.status(500).json({ error: 'Failed to fetch today metrics' });
+  }
+};
+
+exports.getCarrierInvoiceHistory = async (req, res) => {
+  try {
+    const result = await fetchCarrierInvoiceHistory({
+      page: req.query.page,
+      limit: req.query.limit,
+      carrier: req.query.carrier,
+      status: req.query.status,
+      query: req.query.query,
+      from_date: req.query.from_date,
+      to_date: req.query.to_date,
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[ownerDashboard] Failed to fetch carrier invoice history:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch carrier invoice history' });
   }
 };
