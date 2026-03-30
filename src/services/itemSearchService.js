@@ -900,22 +900,34 @@ async function resolveLookupSeeds({ user_id, account, title, sku, itemId }) {
   }
 
   if (sku) {
+    const normalizedSku = String(sku || '').trim();
     const { data: localSkuItem } = await supabase
       .from('items')
       .select('item_title')
       .eq('user_id', user_id)
       .eq('ebay_user_id', account)
-      .ilike('sku', sku)
+      .ilike('sku', `%${normalizedSku}%`)
+      .limit(1)
       .maybeSingle();
 
     if (localSkuItem?.item_title) {
-      pushSeed(localSkuItem.item_title, 'sku_local', sku);
-      pushSupplementalSeeds(localSkuItem.item_title, 'sku_local', sku);
+      pushSeed(localSkuItem.item_title, 'sku_local', normalizedSku);
+      pushSupplementalSeeds(localSkuItem.item_title, 'sku_local', normalizedSku);
     } else {
-      const inventoryItem = await fetchInventoryItemBySku(account, sku);
-      if (inventoryItem?.product?.title) {
-        pushSeed(inventoryItem.product.title, 'sku_ebay', sku);
-        pushSupplementalSeeds(inventoryItem.product.title, 'sku_ebay', sku);
+      if (!looksLikeUrl(normalizedSku)) {
+        try {
+          const inventoryItem = await fetchInventoryItemBySku(account, normalizedSku);
+          if (inventoryItem?.product?.title) {
+            pushSeed(inventoryItem.product.title, 'sku_ebay', normalizedSku);
+            pushSupplementalSeeds(inventoryItem.product.title, 'sku_ebay', normalizedSku);
+          }
+        } catch (error) {
+          console.warn('[item-search] failed to resolve sku via inventory api:', {
+            account,
+            sku: normalizedSku,
+            error: error.message,
+          });
+        }
       }
     }
   }
