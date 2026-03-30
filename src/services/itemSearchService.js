@@ -633,7 +633,7 @@ async function searchUsMarketplaceByTitle(seedTitle, limit = 10) {
       const normalizedItems = (Array.isArray(items) ? items : [])
         .map((item) => ({
           ebay_item_id: item?.legacyItemId || null,
-          ebay_user_id: 'EBAY_US',
+          ebay_user_id: item?.seller?.username || 'EBAY_US',
           sku: null,
           item_title: item?.title || null,
           stocking_url: null,
@@ -643,7 +643,8 @@ async function searchUsMarketplaceByTitle(seedTitle, limit = 10) {
           current_price_currency: item?.price?.currency || null,
           primary_image_url: item?.image?.imageUrl || null,
           updated_at: null,
-          supplier_url: item?.itemWebUrl || null,
+          supplier_url: null,
+          view_item_url: item?.itemWebUrl || null,
           site_code: item?.listingMarketplaceId === 'EBAY_US' ? 'US' : item?.listingMarketplaceId || null,
           is_us_listing:
             String(item?.listingMarketplaceId || '').toUpperCase() === 'EBAY_US' &&
@@ -1047,9 +1048,28 @@ async function searchItemIdSupplierCandidates({ userId, account, itemId, seeds, 
           primary_image_url: listing.primary_image_url || null,
           updated_at: listing.updated_at || null,
           supplier_url: listing.supplier_url,
+          view_item_url: listing.view_item_url || null,
           site_code: listing.site_code || 'US',
           is_us_listing: listing.is_us_listing !== false,
         }
+      : listing.view_item_url
+        ? {
+            ebay_item_id: listing.ebay_item_id || listingItemId || null,
+            ebay_user_id: listing.ebay_user_id || null,
+            sku: listing.sku || null,
+            item_title: listing.item_title || null,
+            stocking_url: null,
+            cost_price: listing.cost_price ?? null,
+            estimated_shipping_cost: listing.estimated_shipping_cost ?? null,
+            current_price_value: listing.current_price_value ?? null,
+            current_price_currency: listing.current_price_currency ?? null,
+            primary_image_url: listing.primary_image_url || null,
+            updated_at: listing.updated_at || null,
+            supplier_url: null,
+            view_item_url: listing.view_item_url,
+            site_code: listing.site_code || 'US',
+            is_us_listing: listing.is_us_listing !== false,
+          }
       : toUsSupplierCandidate(listing, account);
     if (!candidate?.is_us_listing) return;
     const key = `${candidate.ebay_user_id || ''}:${candidate.ebay_item_id || ''}:${candidate.supplier_url || ''}`;
@@ -1088,6 +1108,7 @@ async function searchItemIdSupplierCandidates({ userId, account, itemId, seeds, 
       if (String(item.ebay_item_id || '') === normalizedItemId) return;
       const listing = {
         legacyItemId: item.ebay_item_id,
+        ebay_user_id: item.ebay_user_id,
         sku: item.sku,
         item_title: item.item_title,
         primary_image_url: item.primary_image_url,
@@ -1095,7 +1116,7 @@ async function searchItemIdSupplierCandidates({ userId, account, itemId, seeds, 
         current_price_currency: item.current_price_currency,
         site_code: item.site_code,
         is_us_listing: item.is_us_listing,
-        view_item_url: item.supplier_url,
+        view_item_url: item.view_item_url,
       };
       pushCandidate(listing, seed, 'title_search_us');
     });
