@@ -2333,6 +2333,7 @@ async function getProcurementAlertCandidates(userId) {
 
                     if ((status === 'NEW' || status === 'OUTOFSTOCK') && orderDateTs && orderDateTs <= new Date(newOrMissingThreshold).getTime()) {
                         return {
+                            ...item,
                             id: item.id,
                             title: item.title,
                             currentStatus: status,
@@ -2345,6 +2346,7 @@ async function getProcurementAlertCandidates(userId) {
 
                     if (status === 'ORDERED' && orderedAtTs && orderedAtTs <= new Date(orderedThreshold).getTime()) {
                         return {
+                            ...item,
                             id: item.id,
                             title: item.title,
                             currentStatus: status,
@@ -2355,6 +2357,7 @@ async function getProcurementAlertCandidates(userId) {
 
                     if (status === 'STOCKED_SHIPPED' && shippingDeadlineTs && shippingDeadlineTs <= new Date(shippingDeadlineThreshold).getTime()) {
                         return {
+                            ...item,
                             id: item.id,
                             title: item.title,
                             currentStatus: status,
