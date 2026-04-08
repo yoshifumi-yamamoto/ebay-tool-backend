@@ -321,6 +321,75 @@ const extractCancellationReason = (cancellation = {}) => {
     );
 };
 
+const normalizeOptionalDateTime = (value) => {
+    if (!value) {
+        return null;
+    }
+    if (value instanceof Date) {
+        return Number.isNaN(value.getTime()) ? null : value.toISOString();
+    }
+    if (typeof value === 'object') {
+        const nestedCandidates = [
+            value.value,
+            value.date,
+            value.timestamp,
+            value.iso,
+            value.iso8601,
+            value.dateTime,
+            value.date_time,
+        ];
+        for (const candidate of nestedCandidates) {
+            const normalized = normalizeOptionalDateTime(candidate);
+            if (normalized) {
+                return normalized;
+            }
+        }
+        return null;
+    }
+    const normalized = normalizeOptionalString(value);
+    if (!normalized) {
+        return null;
+    }
+    const date = new Date(normalized);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+const extractCancellationDate = (cancellation = {}) => {
+    const primaryCandidates = [
+        cancellation.closedDate,
+        cancellation.closed_date,
+        cancellation.closeDate,
+        cancellation.close_date,
+        cancellation.cancellationDate,
+        cancellation.cancellation_date,
+        cancellation.cancelDate,
+        cancellation.cancel_date,
+        cancellation.completedDate,
+        cancellation.completed_date,
+        cancellation.lastModifiedDate,
+        cancellation.last_modified_date,
+        cancellation.modificationDate,
+        cancellation.modification_date,
+        cancellation.creationDate,
+        cancellation.creation_date,
+        cancellation.requestedDate,
+        cancellation.requested_date,
+        cancellation.request?.creationDate,
+        cancellation.request?.creation_date,
+        cancellation.request?.requestedDate,
+        cancellation.request?.requested_date,
+        cancellation.request?.closedDate,
+        cancellation.request?.closed_date,
+    ];
+    for (const candidate of primaryCandidates) {
+        const normalized = normalizeOptionalDateTime(candidate);
+        if (normalized) {
+            return normalized;
+        }
+    }
+    return null;
+};
+
 const extractBuyerSelectedShippingService = (order = {}) => {
     const directCandidates = [
         order.buyerSelectedShippingService,
@@ -527,7 +596,8 @@ async function fetchCancellationSummariesFromEbay(accessToken, marketplaceId = '
             }
             const status = extractCancellationStatus(cancellation);
             const reason = extractCancellationReason(cancellation);
-            cancellationsSummary.set(orderNo, { status, reason });
+            const cancelAt = extractCancellationDate(cancellation);
+            cancellationsSummary.set(orderNo, { status, reason, cancelAt });
         });
 
         if (cancellations.length < limit) {
@@ -541,6 +611,7 @@ async function fetchCancellationSummariesFromEbay(accessToken, marketplaceId = '
         orderNo,
         status: summary?.status || null,
         reason: summary?.reason || null,
+        cancelAt: summary?.cancelAt || null,
     }));
 }
 
@@ -1791,6 +1862,7 @@ async function saveOrdersAndBuyers(userId, options = {}) {
                                     null,
                                 extractedStatus: extractCancellationStatus(entry),
                                 extractedReason: extractCancellationReason(entry),
+                                extractedCancelAt: extractCancellationDate(entry),
                                 payload: entry,
                             })),
                             null,
@@ -1810,7 +1882,11 @@ async function saveOrdersAndBuyers(userId, options = {}) {
                         for (const item of cancellations.filter((entry) => isFinalCancelStatus(entry.status))) {
                             let updateQuery = supabase
                                 .from('orders')
-                                .update({ status: 'CANCELED', cancel_reason: item.reason || null })
+                                .update({
+                                    status: 'CANCELED',
+                                    cancel_reason: item.reason || null,
+                                    cancel_at: item.cancelAt || null,
+                                })
                                 .eq('order_no', item.orderNo);
                             if (ebayUserId) {
                                 updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
@@ -1834,7 +1910,11 @@ async function saveOrdersAndBuyers(userId, options = {}) {
                         for (const item of cancellations.filter((entry) => !isFinalCancelStatus(entry.status))) {
                             let updateQuery = supabase
                                 .from('orders')
-                                .update({ status: 'CANCEL_REQUESTED', cancel_reason: item.reason || null })
+                                .update({
+                                    status: 'CANCEL_REQUESTED',
+                                    cancel_reason: item.reason || null,
+                                    cancel_at: item.cancelAt || null,
+                                })
                                 .eq('order_no', item.orderNo);
                             if (ebayUserId) {
                                 updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
@@ -2170,10 +2250,15 @@ async function fetchArchivedOrders(userId, statusFilter = null, filters = {}) {
         .from('orders')
         .select('*, order_line_items(*)')
         .eq('user_id', userId)
-        .order('order_date', { ascending: false });
+        .order(statusFilter === 'CANCELED' ? 'cancel_at' : 'order_date', { ascending: false });
 
-    if (start_date) query = query.gte('order_date', start_date);
-    if (end_date) query = query.lte('order_date', end_date);
+    if (statusFilter === 'CANCELED') {
+        if (start_date) query = query.gte('cancel_at', `${start_date}T00:00:00`);
+        if (end_date) query = query.lte('cancel_at', `${end_date}T23:59:59.999`);
+    } else {
+        if (start_date) query = query.gte('order_date', start_date);
+        if (end_date) query = query.lte('order_date', end_date);
+    }
     if (ebay_user_id) query = query.eq('ebay_user_id', ebay_user_id);
 
     if (statusFilter) {
@@ -2215,8 +2300,8 @@ async function fetchArchivedSummary(userId, filters = {}) {
         .select('id', { count: 'exact' })
         .eq('user_id', userId)
         .eq('status', 'CANCELED');
-    if (start_date) canceledQuery.gte('order_date', start_date);
-    if (end_date) canceledQuery.lte('order_date', end_date);
+    if (start_date) canceledQuery.gte('cancel_at', `${start_date}T00:00:00`);
+    if (end_date) canceledQuery.lte('cancel_at', `${end_date}T23:59:59.999`);
     if (ebay_user_id) canceledQuery.eq('ebay_user_id', ebay_user_id);
     const { count: canceledCount } = await canceledQuery;
 
