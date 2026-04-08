@@ -42,6 +42,7 @@ const nameMapRoutes = require('./routes/nameMapRoutes');
 const fixedCostRoutes = require('./routes/fixedCostRoutes');
 const priorityQuadrantRoutes = require('./routes/priorityQuadrantRoutes');
 const inventoryCountRoutes = require('./routes/inventoryCountRoutes');
+const shippingCountryGuideRoutes = require('./routes/shippingCountryGuideRoutes');
 
 const { CronJob } = require('cron');
 const { spawn } = require('child_process');
@@ -143,6 +144,7 @@ app.use('/api/name-maps', nameMapRoutes);
 app.use('/api/fixed-costs', fixedCostRoutes);
 app.use('/api/priority', priorityQuadrantRoutes);
 app.use('/api/inventory-counts', inventoryCountRoutes);
+app.use('/api/shipping-country-guides', shippingCountryGuideRoutes);
 
 // スケジューラを環境変数に基づいて起動
 if (process.env.ENABLE_SCHEDULER === 'true') {
