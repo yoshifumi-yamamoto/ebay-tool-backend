@@ -1,6 +1,16 @@
 const supabase = require('../supabaseClient');
 const axios = require('axios');
 
+const EBAY_SCOPES = {
+    BASE: 'https://api.ebay.com/oauth/api_scope',
+    INVENTORY:
+        'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.inventory',
+    FULFILLMENT:
+        'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+    FULL:
+        'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.marketing.readonly https://api.ebay.com/oauth/api_scope/sell.marketing https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.analytics.readonly https://api.ebay.com/oauth/api_scope/sell.finances https://api.ebay.com/oauth/api_scope/sell.payment.dispute https://api.ebay.com/oauth/api_scope/commerce.identity.readonly https://api.ebay.com/oauth/api_scope/sell.reputation https://api.ebay.com/oauth/api_scope/sell.reputation.readonly https://api.ebay.com/oauth/api_scope/commerce.notification.subscription https://api.ebay.com/oauth/api_scope/commerce.notification.subscription.readonly https://api.ebay.com/oauth/api_scope/sell.stores https://api.ebay.com/oauth/api_scope/sell.stores.readonly https://api.ebay.com/oauth/api_scope/commerce.feedback',
+};
+
 exports.createAccount = async (accountData) => {
   const { data, error } = await supabase
     .from('accounts')
@@ -85,7 +95,7 @@ exports.fetchEbayAccountTokens = async (userId) => {
     return data;
 }
 
-exports.refreshEbayToken = async (refreshToken) => {
+exports.refreshEbayToken = async (refreshToken, options = {}) => {
     let queryString;
     try {
         queryString = (await import('query-string')).default;
@@ -93,10 +103,11 @@ exports.refreshEbayToken = async (refreshToken) => {
         console.error('Failed to import query-string:', e);
         return res.status(500).json({ error: 'Internal Server Error' });
     }
+    const scope = options.scope || EBAY_SCOPES.FULL;
     const response = await axios.post('https://api.ebay.com/identity/v1/oauth2/token', queryString.stringify({
         grant_type: 'refresh_token',
         refresh_token: refreshToken,
-        scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.marketing.readonly https://api.ebay.com/oauth/api_scope/sell.marketing https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.analytics.readonly https://api.ebay.com/oauth/api_scope/sell.finances https://api.ebay.com/oauth/api_scope/sell.payment.dispute https://api.ebay.com/oauth/api_scope/commerce.identity.readonly https://api.ebay.com/oauth/api_scope/sell.reputation https://api.ebay.com/oauth/api_scope/sell.reputation.readonly https://api.ebay.com/oauth/api_scope/commerce.notification.subscription https://api.ebay.com/oauth/api_scope/commerce.notification.subscription.readonly https://api.ebay.com/oauth/api_scope/sell.stores https://api.ebay.com/oauth/api_scope/sell.stores.readonly https://api.ebay.com/oauth/api_scope/commerce.feedback' // 必要に応じてスコープを調整
+        scope,
     }), {
         headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -128,5 +139,7 @@ exports.getRefreshTokenByEbayUserId = async (ebayUserId) => {
       throw new Error('No eBay account tokens found for the given eBay user ID');
     }
   
-    return data[0].refresh_token;
+  return data[0].refresh_token;
   };
+
+exports.EBAY_SCOPES = EBAY_SCOPES;

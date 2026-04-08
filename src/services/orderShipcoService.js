@@ -11,6 +11,12 @@ const {
   buildSenderAddress,
 } = require('./shipcoPayloadBuilder');
 
+const SHIPCO_TO_DB_CARRIER = {
+  fedex: 'FEDEX',
+  dhl: 'DHL',
+  japanpost: 'JP_POST',
+};
+
 const fetchOrder = async (orderNo, userId) => {
   const { data, error } = await supabase
     .from('orders')
@@ -124,7 +130,45 @@ async function estimateRates(orderNo, userId, payload = {}) {
       currency: normalizedCurrency,
     };
   });
-  return { rates: normalizedRates, errors: rateErrors };
+  const activeRates = normalizedRates.filter((rate) => rate?.carrier && rate?.service);
+  const serviceCodes = Array.from(new Set(activeRates.map((rate) => rate.service)));
+  const carriers = Array.from(new Set(activeRates.map((rate) => SHIPCO_TO_DB_CARRIER[rate.carrier]).filter(Boolean)));
+  let displayMap = new Map();
+
+  if (serviceCodes.length > 0 && carriers.length > 0) {
+    const { data: shippingRateRows, error: shippingRateError } = await supabase
+      .from('shipping_rates')
+      .select('carrier, service_code, service_name, display_name')
+      .in('carrier', carriers)
+      .in('service_code', serviceCodes)
+      .eq('is_active', true);
+    if (shippingRateError) {
+      throw new Error('Failed to load shipping rate labels: ' + shippingRateError.message);
+    }
+    displayMap = new Map(
+      (shippingRateRows || []).map((row) => [
+        `${row.carrier}::${row.service_code}`,
+        {
+          display_name: row.display_name || row.service_name || row.service_code,
+          service_name: row.service_name || null,
+        },
+      ])
+    );
+  }
+
+  const enrichedRates = normalizedRates.map((rate) => {
+    const dbCarrier = SHIPCO_TO_DB_CARRIER[rate?.carrier];
+    const matched = dbCarrier && rate?.service
+      ? displayMap.get(`${dbCarrier}::${rate.service}`)
+      : null;
+    return {
+      ...rate,
+      display_name: matched?.display_name || null,
+      service_name: matched?.service_name || null,
+    };
+  });
+
+  return { rates: enrichedRates, errors: rateErrors };
 }
 
 async function createShipment(orderNo, userId, payload = {}) {

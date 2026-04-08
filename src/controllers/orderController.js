@@ -5,8 +5,12 @@ const { logSystemError } = require('../services/systemErrorService');
 // eBayの注文とバイヤー情報を同期
 exports.syncOrders = async (req, res) => {
     const userId = req.params.userId; // ユーザーIDはリクエストから取得する
+    const fastMode = String(req.query.fast || 'false').toLowerCase() === 'true';
     try {
-        await orderService.saveOrdersAndBuyers(userId);
+        await orderService.saveOrdersAndBuyers(userId, { runBackfill: !fastMode });
+        if (fastMode) {
+            return res.json({ ok: true, userId: Number(userId), fast: true });
+        }
         const relevantOrders = await orderService.fetchRelevantOrders(userId); // 関連する注文を取得
         res.json(relevantOrders);
     } catch (error) {

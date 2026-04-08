@@ -1,6 +1,6 @@
 const supabase = require('../supabaseClient');
 const axios = require('axios');
-const { fetchEbayAccountTokens, refreshEbayToken } = require("./accountService")
+const { fetchEbayAccountTokens, refreshEbayToken, EBAY_SCOPES } = require("./accountService")
 const { fetchItemDetails } = require("./itemService")
 const { upsertBuyer } = require('./buyerService');
 const { logError } = require('./loggingService');
@@ -299,6 +299,136 @@ const extractCancellationStatus = (cancellation = {}) => {
     );
 };
 
+const normalizeOptionalString = (value) => {
+    if (value === undefined || value === null) {
+        return null;
+    }
+    const normalized = String(value).trim();
+    return normalized || null;
+};
+
+const extractCancellationReason = (cancellation = {}) => {
+    return (
+        normalizeOptionalString(cancellation.closeReason) ||
+        normalizeOptionalString(cancellation.close_reason) ||
+        normalizeOptionalString(cancellation.cancelReason) ||
+        normalizeOptionalString(cancellation.cancel_reason) ||
+        normalizeOptionalString(cancellation.reason) ||
+        normalizeOptionalString(cancellation.request?.reason) ||
+        normalizeOptionalString(cancellation.requestReason) ||
+        normalizeOptionalString(cancellation.request_reason) ||
+        null
+    );
+};
+
+const extractBuyerSelectedShippingService = (order = {}) => {
+    const directCandidates = [
+        order.buyerSelectedShippingService,
+        order.buyer_selected_shipping_service,
+        order.selectedShippingService,
+        order.selected_shipping_service,
+        order.shippingService,
+        order.shipping_service,
+    ];
+    for (const candidate of directCandidates) {
+        const normalized = normalizeOptionalString(candidate);
+        if (normalized) {
+            return normalized;
+        }
+    }
+
+    const fulfillmentInstructions = ensureArray(order.fulfillmentStartInstructions);
+    for (const instruction of fulfillmentInstructions) {
+        const shippingStep = instruction?.shippingStep || instruction?.shipping_step || {};
+        const candidates = [
+            shippingStep.shippingServiceName,
+            shippingStep.shipping_service_name,
+            shippingStep.selectedShippingService,
+            shippingStep.selected_shipping_service,
+            shippingStep.shippingOptionName,
+            shippingStep.shipping_option_name,
+            shippingStep.shippingServiceCode,
+            shippingStep.shipping_service_code,
+            instruction?.shippingServiceName,
+            instruction?.shipping_service_name,
+        ];
+        for (const candidate of candidates) {
+            const normalized = normalizeOptionalString(candidate);
+            if (normalized) {
+                return normalized;
+            }
+        }
+    }
+
+    const lineItems = ensureArray(order.lineItems);
+    for (const lineItem of lineItems) {
+        const instructionArray = ensureArray(lineItem?.lineItemFulfillmentInstructions);
+        for (const instruction of instructionArray) {
+            const shippingStep = instruction?.shippingStep || instruction?.shipping_step || {};
+            const candidates = [
+                shippingStep.shippingServiceName,
+                shippingStep.shipping_service_name,
+                shippingStep.selectedShippingService,
+                shippingStep.selected_shipping_service,
+                shippingStep.shippingOptionName,
+                shippingStep.shipping_option_name,
+                shippingStep.shippingServiceCode,
+                shippingStep.shipping_service_code,
+                instruction?.shippingServiceName,
+                instruction?.shipping_service_name,
+            ];
+            for (const candidate of candidates) {
+                const normalized = normalizeOptionalString(candidate);
+                if (normalized) {
+                    return normalized;
+                }
+            }
+        }
+    }
+
+    return null;
+};
+
+const buildBuyerSelectedShippingServiceDebug = (order = {}) => {
+    const directCandidates = {
+        buyerSelectedShippingService: order.buyerSelectedShippingService ?? null,
+        buyer_selected_shipping_service: order.buyer_selected_shipping_service ?? null,
+        selectedShippingService: order.selectedShippingService ?? null,
+        selected_shipping_service: order.selected_shipping_service ?? null,
+        shippingService: order.shippingService ?? null,
+        shipping_service: order.shipping_service ?? null,
+    };
+
+    const fulfillmentStartInstructions = ensureArray(order.fulfillmentStartInstructions).map((instruction) => {
+        const shippingStep = instruction?.shippingStep || instruction?.shipping_step || {};
+        return {
+            instructionKeys: Object.keys(instruction || {}),
+            shippingStepKeys: Object.keys(shippingStep || {}),
+            shippingStep,
+        };
+    });
+
+    const lineItemInstructions = ensureArray(order.lineItems).map((lineItem) => ({
+        lineItemId: lineItem?.lineItemId || null,
+        instructions: ensureArray(lineItem?.lineItemFulfillmentInstructions).map((instruction) => {
+            const shippingStep = instruction?.shippingStep || instruction?.shipping_step || {};
+            return {
+                instructionKeys: Object.keys(instruction || {}),
+                shippingStepKeys: Object.keys(shippingStep || {}),
+                shippingStep,
+            };
+        }),
+    }));
+
+    return {
+        orderId: order?.orderId || null,
+        directCandidates,
+        extractedValue: extractBuyerSelectedShippingService(order),
+        fulfillmentStartInstructions,
+        lineItemInstructions,
+    };
+};
+
 async function fetchCancellationSummariesFromEbay(accessToken, marketplaceId = 'EBAY_US') {
     const baseUrl = 'https://api.ebay.com/post-order/v2/cancellation/search';
     const headers = {
@@ -396,7 +526,8 @@ async function fetchCancellationSummariesFromEbay(accessToken, marketplaceId = '
                 return;
             }
             const status = extractCancellationStatus(cancellation);
-            cancellationsSummary.set(orderNo, status);
+            const reason = extractCancellationReason(cancellation);
+            cancellationsSummary.set(orderNo, { status, reason });
         });
 
         if (cancellations.length < limit) {
@@ -406,10 +537,77 @@ async function fetchCancellationSummariesFromEbay(accessToken, marketplaceId = '
         offset += cancellations.length;
     }
 
-    return Array.from(cancellationsSummary.entries()).map(([orderNo, status]) => ({
+    return Array.from(cancellationsSummary.entries()).map(([orderNo, summary]) => ({
         orderNo,
-        status,
+        status: summary?.status || null,
+        reason: summary?.reason || null,
     }));
+}
+
+async function fetchCancellationDebugEntriesFromEbay(accessToken, marketplaceId = 'EBAY_US', targetOrderNo = null) {
+    if (!targetOrderNo) {
+        return [];
+    }
+    const baseUrl = 'https://api.ebay.com/post-order/v2/cancellation/search';
+    const headers = {
+        Authorization: `IAF ${accessToken}`,
+        'Content-Type': 'application/json',
+        'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+    };
+
+    const now = new Date();
+    const fromDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const creationDateRangeFrom = fromDate.toISOString();
+    const creationDateRangeTo = now.toISOString();
+    const limit = 200;
+    let offset = 0;
+    const matches = [];
+
+    for (let page = 0; page < 50; page += 1) {
+        const response = await axios({
+            method: 'get',
+            url: baseUrl,
+            headers,
+            params: {
+                creation_date_range_from: creationDateRangeFrom,
+                creation_date_range_to: creationDateRangeTo,
+                limit,
+                offset,
+            },
+        });
+
+        const data = response?.data || {};
+        const cancellations =
+            data.cancellations ||
+            data.cancellationRequests ||
+            data.cancellation ||
+            [];
+
+        if (!Array.isArray(cancellations) || cancellations.length === 0) {
+            break;
+        }
+
+        cancellations.forEach((cancellation) => {
+            const orderNo =
+                cancellation?.order_id ||
+                cancellation?.orderId ||
+                cancellation?.legacy_order_id ||
+                cancellation?.legacyOrderId ||
+                cancellation?.order?.orderId ||
+                cancellation?.order?.order_id ||
+                null;
+            if (orderNo === targetOrderNo) {
+                matches.push(cancellation);
+            }
+        });
+
+        if (cancellations.length < limit) {
+            break;
+        }
+        offset += cancellations.length;
+    }
+
+    return matches;
 }
 
 /**
@@ -471,6 +669,26 @@ async function fetchAndProcessLineItems(order, accessToken, existingImages, item
             cost_price: existingCostPrice != null ? existingCostPrice : itemData ? itemData.cost_price : null
         };
     }));
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+    const targetConcurrency = Math.max(1, Number(concurrency) || 1);
+    const results = new Array(items.length);
+    let index = 0;
+
+    const runners = Array.from({ length: Math.min(targetConcurrency, items.length) }, async () => {
+        while (true) {
+            const currentIndex = index;
+            index += 1;
+            if (currentIndex >= items.length) {
+                return;
+            }
+            results[currentIndex] = await worker(items[currentIndex], currentIndex);
+        }
+    });
+
+    await Promise.all(runners);
+    return results;
 }
 
 function isValidImageUrl(value) {
@@ -755,25 +973,28 @@ function extractShippingTrackingNumber(order = {}) {
  * @param {Array} lineItems - 加工済みラインアイテム
  * @param {string} researcher - リサーチ担当者
  */
-async function upsertOrderLineItems(order, lineItems, researcher) {
+async function upsertOrderLineItems(order, lineItems, researcher, existingLineItemsMap = null) {
     if (!lineItems?.length) {
         return;
     }
 
-    const lineItemIds = lineItems.map((item) => item.lineItemId);
-    const { data: existingLineItems, error: fetchError } = await supabase
-        .from('order_line_items')
-        .select('id, procurement_tracking_number, procurement_url, procurement_entries, procurement_status, procurement_ordered_at, cost_price, researcher, item_image, stocking_url, total_value, total_currency, line_item_cost_value, line_item_cost_currency, quantity')
-        .in('id', lineItemIds);
+    let existingMap = existingLineItemsMap;
+    if (!existingMap) {
+        const lineItemIds = lineItems.map((item) => item.lineItemId);
+        const { data: existingLineItems, error: fetchError } = await supabase
+            .from('order_line_items')
+            .select('id, procurement_tracking_number, procurement_url, procurement_entries, procurement_status, procurement_ordered_at, cost_price, researcher, item_image, stocking_url, total_value, total_currency, line_item_cost_value, line_item_cost_currency, quantity')
+            .in('id', lineItemIds);
 
-    if (fetchError && fetchError.code !== 'PGRST116') {
-        console.error('order_line_items取得時のエラー:', fetchError.message);
+        if (fetchError && fetchError.code !== 'PGRST116') {
+            console.error('order_line_items取得時のエラー:', fetchError.message);
+        }
+
+        existingMap = {};
+        existingLineItems?.forEach((item) => {
+            existingMap[item.id] = item;
+        });
     }
-
-    const existingMap = {};
-    existingLineItems?.forEach((item) => {
-        existingMap[item.id] = item;
-    });
 
     const toNumber = (value) => {
         if (value === undefined || value === null) {
@@ -958,7 +1179,7 @@ async function markOrdersAsShipped(orderIds) {
  * @param {string} lineItemFulfillmentStatus - ラインアイテムの履行状況
  * @returns {Object} - 更新された注文データ
  */
-async function updateOrderInSupabase(order, buyerId, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher) {
+async function updateOrderInSupabase(order, buyerId, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher, existingData = null) {
     // 注文収益を計算する
     const earningsAfterPlFee = order.paymentSummary.totalDueSeller.value * 0.979; // 注文収益 - プロモーテッドリスティングス(2.1%)
     const toNumberOrNull = (value) => {
@@ -981,16 +1202,24 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
     }
 
     // 既存のデータを取得
-    const { data: existingData, error: fetchError } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('order_no', order.orderId)
-        .single();
+    if (existingData === null) {
+        const { data: fetchedExistingData, error: fetchError } = await supabase
+            .from('orders')
+            .select('*')
+            .eq('order_no', order.orderId)
+            .single();
 
-    if (fetchError && fetchError.code !== 'PGRST116') { // データが存在しない場合のエラーコードを無視
-        console.error('Supabaseでの注文データの取得エラー:', fetchError.message);
-        return null;
+        if (fetchError && fetchError.code !== 'PGRST116') { // データが存在しない場合のエラーコードを無視
+            console.error('Supabaseでの注文データの取得エラー:', fetchError.message);
+            return null;
+        }
+        existingData = fetchedExistingData || null;
     }
+
+    const buyerSelectedShippingService =
+        extractBuyerSelectedShippingService(order) ||
+        existingData?.buyer_selected_shipping_service ||
+        null;
 
     const normalizeCurrencyCode = (value) => {
         if (typeof value !== 'string') {
@@ -1109,7 +1338,16 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
                 }
             }
         } catch (error) {
-            logError('orderService.updateOrderInSupabase.fetchShipmentDetailsByReference', error);
+            await logError({
+                itemId: order.orderId || 'unknown',
+                errorType: 'orderService.updateOrderInSupabase.fetchShipmentDetailsByReference',
+                errorMessage: error?.message || 'Ship&Co lookup failed',
+                additionalInfo: {
+                    orderId: order.orderId || null,
+                    status: error?.response?.status || null,
+                    responseData: error?.response?.data || null,
+                },
+            });
             console.error(
                 `[orderService] Ship&Co lookup failed for order ${order.orderId}:`,
                 error?.message || error
@@ -1270,6 +1508,8 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
         shipping_tracking_number:
             shippingTrackingNumber || (existingData ? existingData.shipping_tracking_number : null),
         shipping_carrier: resolvedShippingCarrier,
+        buyer_selected_shipping_service: buyerSelectedShippingService,
+        cancel_reason: existingData?.cancel_reason || null,
         shipco_parcel_weight: resolvedParcelWeight,
         shipco_parcel_weight_unit: resolvedParcelWeightUnit,
         shipco_parcel_length: resolvedParcelLength,
@@ -1299,7 +1539,12 @@ async function updateOrderInSupabase(order, buyerId, userId, lineItems, shipping
 
 
 // すべての注文とバイヤー情報をSupabaseに保存する関数
-async function saveOrdersAndBuyers(userId) {
+async function saveOrdersAndBuyers(userId, options = {}) {
+    const runBackfill = options.runBackfill !== false;
+    const orderProcessingConcurrency = Math.max(
+        1,
+        Number.parseInt(process.env.EBAY_ORDER_PROCESS_CONCURRENCY || '4', 10) || 4
+    );
     const accounts = await fetchEbayAccountTokens(userId);
     for (const account of accounts) {
         const refreshToken = account?.refresh_token;
@@ -1309,7 +1554,7 @@ async function saveOrdersAndBuyers(userId) {
 
         let accessToken;
         try {
-            accessToken = await refreshEbayToken(refreshToken);
+            accessToken = await refreshEbayToken(refreshToken, { scope: EBAY_SCOPES.FULFILLMENT });
         } catch (tokenError) {
             const errorMessage =
                 tokenError?.response?.data?.error_description ||
@@ -1347,12 +1592,16 @@ async function saveOrdersAndBuyers(userId) {
 
         try {
             let orders = await fetchOrdersFromEbay(accessToken);
+            if (orders.length === 0) {
+                continue;
+            }
 
             const legacyItemIds = orders.flatMap(order => order.lineItems.map(item => item.legacyItemId));
 
             const { data: existingOrders, error: existingOrdersError } = await supabase
                 .from('orders')
                 .select(`
+                    *,
                     order_no,
                     order_line_items (
                         id,
@@ -1362,8 +1611,15 @@ async function saveOrdersAndBuyers(userId) {
                         cost_price,
                         procurement_tracking_number,
                         procurement_url,
+                        procurement_entries,
                         procurement_status,
-                        researcher
+                        procurement_ordered_at,
+                        researcher,
+                        total_value,
+                        total_currency,
+                        line_item_cost_value,
+                        line_item_cost_currency,
+                        quantity
                     )
                 `)
                 .in('order_no', orders.map(order => order.orderId));
@@ -1375,7 +1631,9 @@ async function saveOrdersAndBuyers(userId) {
 
             const existingImages = {};
             const existingLineItemData = {};
+            const existingOrdersMap = {};
             existingOrders.forEach(order => {
+                existingOrdersMap[order.order_no] = order;
                 order.order_line_items?.forEach(item => {
                     if (item.item_image) {
                         existingImages[item.legacy_item_id] = item.item_image;
@@ -1400,25 +1658,26 @@ async function saveOrdersAndBuyers(userId) {
             });
 
 
-            const debugOrderNo = process.env.DEBUG_ORDER_NO || '24-14010-37569';
-            const targetDebugOrderNo = '05-14142-80431';
+            const debugOrderNo = process.env.DEBUG_ORDER_NO || null;
             let debugOrderFound = false;
-            for (let order of orders) {
+            await mapWithConcurrency(orders, orderProcessingConcurrency, async (order) => {
                 try {
-                    if (order?.orderId === debugOrderNo) {
+                    if (debugOrderNo && order?.orderId === debugOrderNo) {
                         debugOrderFound = true;
                         console.info(
                             '[orderService] Debug eBay order payload:',
                             JSON.stringify(order, null, 2)
                         );
+                        console.info(
+                            '[orderService] Debug buyer selected shipping service payload:',
+                            JSON.stringify(buildBuyerSelectedShippingServiceDebug(order), null, 2)
+                        );
                     }
-                    if (order?.orderId === targetDebugOrderNo) {
-                        debugOrderFound = true;
-                    }
+                    const existingOrder = existingOrdersMap[order.orderId] || null;
                     const buyer = await fetchAndUpsertBuyer(order, userId);
                     if (!buyer) {
                         console.error("注文に対するバイヤーのアップサート失敗:", order);
-                        continue;
+                        return;
                     }
 
                     const lineItemFulfillmentStatus = order.lineItems?.[0]?.lineItemFulfillmentStatus || 'NOT_STARTED';
@@ -1440,9 +1699,18 @@ async function saveOrdersAndBuyers(userId) {
                         (primaryLineItemId && existingLineItemData[primaryLineItemId]?.researcher) ||
                         '';
 
-                    await updateOrderInSupabase(order, buyer.id, userId, lineItems, shippingCost, lineItemFulfillmentStatus, researcher);
+                    await updateOrderInSupabase(
+                        order,
+                        buyer.id,
+                        userId,
+                        lineItems,
+                        shippingCost,
+                        lineItemFulfillmentStatus,
+                        researcher,
+                        existingOrder
+                    );
 
-                    await upsertOrderLineItems(order, lineItems, researcher);
+                    await upsertOrderLineItems(order, lineItems, researcher, existingLineItemData);
                 } catch (error) {
                     console.log("itemsMap", itemsMap)
                     console.log("order.orderId,", order.orderId)
@@ -1463,20 +1731,38 @@ async function saveOrdersAndBuyers(userId) {
                     });
 
                 }
-            }
+            });
             const marketplaceId = account?.marketplace_id || process.env.EBAY_MARKETPLACE_ID || 'EBAY_US';
-            if (!debugOrderFound) {
-                const directOrder = await fetchEbayOrderById(targetDebugOrderNo, accessToken);
+            if (debugOrderNo && !debugOrderFound) {
+                const directOrder = await fetchEbayOrderById(debugOrderNo, accessToken);
                 if (directOrder) {
-                    orders.push(directOrder);
+                    console.info(
+                        '[orderService] Debug direct eBay order payload:',
+                        JSON.stringify(directOrder, null, 2)
+                    );
+                    console.info(
+                        '[orderService] Debug direct buyer selected shipping service payload:',
+                        JSON.stringify(buildBuyerSelectedShippingServiceDebug(directOrder), null, 2)
+                    );
                 } else {
-                    const postOrder = await fetchPostOrderByLegacyId(targetDebugOrderNo, accessToken, marketplaceId);
+                    const postOrder = await fetchPostOrderByLegacyId(debugOrderNo, accessToken, marketplaceId);
                     if (postOrder) {
+                        console.info(
+                            '[orderService] Debug post-order payload:',
+                            JSON.stringify(postOrder, null, 2)
+                        );
                         const fulfillmentOrderId = findFulfillmentOrderIdInPostOrder(postOrder);
                         if (fulfillmentOrderId) {
                             const fallbackOrder = await fetchEbayOrderById(fulfillmentOrderId, accessToken);
                             if (fallbackOrder) {
-                                orders.push(fallbackOrder);
+                                console.info(
+                                    '[orderService] Debug fallback fulfillment order payload:',
+                                    JSON.stringify(fallbackOrder, null, 2)
+                                );
+                                console.info(
+                                    '[orderService] Debug fallback buyer selected shipping service payload:',
+                                    JSON.stringify(buildBuyerSelectedShippingServiceDebug(fallbackOrder), null, 2)
+                                );
                             }
                         }
                     }
@@ -1485,6 +1771,33 @@ async function saveOrdersAndBuyers(userId) {
 
             try {
                 const cancellations = await fetchCancellationSummariesFromEbay(accessToken, marketplaceId);
+                if (debugOrderNo) {
+                    const debugCancellations = await fetchCancellationDebugEntriesFromEbay(
+                        accessToken,
+                        marketplaceId,
+                        debugOrderNo
+                    );
+                    console.info(
+                        '[orderService] Debug cancellation payloads:',
+                        JSON.stringify(
+                            debugCancellations.map((entry) => ({
+                                orderNo:
+                                    entry?.order_id ||
+                                    entry?.orderId ||
+                                    entry?.legacy_order_id ||
+                                    entry?.legacyOrderId ||
+                                    entry?.order?.orderId ||
+                                    entry?.order?.order_id ||
+                                    null,
+                                extractedStatus: extractCancellationStatus(entry),
+                                extractedReason: extractCancellationReason(entry),
+                                payload: entry,
+                            })),
+                            null,
+                            2
+                        )
+                    );
+                }
                 if (cancellations.length > 0) {
                     const cancelledOrderNos = cancellations
                         .filter((item) => isFinalCancelStatus(item.status))
@@ -1494,47 +1807,51 @@ async function saveOrdersAndBuyers(userId) {
                         .map((item) => item.orderNo);
 
                     if (cancelledOrderNos.length > 0) {
-                        let updateQuery = supabase
-                            .from('orders')
-                            .update({ status: 'CANCELED' })
-                            .in('order_no', cancelledOrderNos);
-                        if (ebayUserId) {
-                            updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
+                        for (const item of cancellations.filter((entry) => isFinalCancelStatus(entry.status))) {
+                            let updateQuery = supabase
+                                .from('orders')
+                                .update({ status: 'CANCELED', cancel_reason: item.reason || null })
+                                .eq('order_no', item.orderNo);
+                            if (ebayUserId) {
+                                updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
+                            }
+                            const { error: cancelUpdateError } = await updateQuery;
+                            if (cancelUpdateError) {
+                                console.error(
+                                    '[orderService] Failed to update cancelled order:',
+                                    item.orderNo,
+                                    cancelUpdateError.message
+                                );
+                            }
                         }
-                        const { error: cancelUpdateError } = await updateQuery;
-                        if (cancelUpdateError) {
-                            console.error(
-                                '[orderService] Failed to update cancelled orders:',
-                                cancelUpdateError.message
-                            );
-                        } else {
-                            console.info(
-                                '[orderService] Cancelled orders updated:',
-                                `count=${cancelledOrderNos.length}`
-                            );
-                        }
+                        console.info(
+                            '[orderService] Cancelled orders updated:',
+                            `count=${cancelledOrderNos.length}`
+                        );
                     }
 
                     if (requestedOrderNos.length > 0) {
-                        let updateQuery = supabase
-                            .from('orders')
-                            .update({ status: 'CANCEL_REQUESTED' })
-                            .in('order_no', requestedOrderNos);
-                        if (ebayUserId) {
-                            updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
+                        for (const item of cancellations.filter((entry) => !isFinalCancelStatus(entry.status))) {
+                            let updateQuery = supabase
+                                .from('orders')
+                                .update({ status: 'CANCEL_REQUESTED', cancel_reason: item.reason || null })
+                                .eq('order_no', item.orderNo);
+                            if (ebayUserId) {
+                                updateQuery = updateQuery.eq('ebay_user_id', ebayUserId);
+                            }
+                            const { error: requestUpdateError } = await updateQuery;
+                            if (requestUpdateError) {
+                                console.error(
+                                    '[orderService] Failed to update cancellation requested order:',
+                                    item.orderNo,
+                                    requestUpdateError.message
+                                );
+                            }
                         }
-                        const { error: requestUpdateError } = await updateQuery;
-                        if (requestUpdateError) {
-                            console.error(
-                                '[orderService] Failed to update cancellation requested orders:',
-                                requestUpdateError.message
-                            );
-                        } else {
-                            console.info(
-                                '[orderService] Cancellation requested orders updated:',
-                                `count=${requestedOrderNos.length}`
-                            );
-                        }
+                        console.info(
+                            '[orderService] Cancellation requested orders updated:',
+                            `count=${requestedOrderNos.length}`
+                        );
                     }
                 } else {
                     console.info('[orderService] No cancellations found for update.');
@@ -1567,8 +1884,10 @@ async function saveOrdersAndBuyers(userId) {
         }
     }
 
-    const runBackfill = String(process.env.SHIPCO_BACKFILL_MISSING_TRACKING_ON_SYNC || 'true').toLowerCase() !== 'false';
-    if (runBackfill) {
+    const shouldRunBackfill =
+        runBackfill &&
+        String(process.env.SHIPCO_BACKFILL_MISSING_TRACKING_ON_SYNC || 'true').toLowerCase() !== 'false';
+    if (shouldRunBackfill) {
         try {
             await backfillRecentShippedOrdersMissingTracking({ userId });
         } catch (error) {

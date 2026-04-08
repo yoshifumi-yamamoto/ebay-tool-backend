@@ -5,6 +5,10 @@ const SHIP_AND_CO_API_URL = process.env.SHIPANDCO_API_URL || 'https://api.shipan
 const SHIP_AND_CO_API_TOKEN = process.env.SHIPANDCO_API_TOKEN || process.env.SHIPANDCO_API_KEY || null;
 const SHIP_AND_CO_DEFAULT_LIMIT = Number(process.env.SHIPANDCO_FETCH_LIMIT) || 100;
 const SHIP_AND_CO_MAX_PAGES = Number(process.env.SHIPANDCO_FETCH_MAX_PAGES) || 50;
+const SHIP_AND_CO_RATE_LIMIT_COOLDOWN_MS =
+    Number(process.env.SHIPANDCO_RATE_LIMIT_COOLDOWN_MS) || 60_000;
+
+let shipcoRateLimitedUntil = 0;
 
 const buildClient = () => {
     if (!SHIP_AND_CO_API_TOKEN) {
@@ -18,6 +22,56 @@ const buildClient = () => {
             'Content-Type': 'application/json',
         },
         timeout: 20_000,
+    });
+};
+
+const getRetryAfterMs = (error) => {
+    const retryAfterHeader = error?.response?.headers?.['retry-after'];
+    if (!retryAfterHeader) {
+        return SHIP_AND_CO_RATE_LIMIT_COOLDOWN_MS;
+    }
+    const seconds = Number(retryAfterHeader);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+        return seconds * 1000;
+    }
+    const retryDate = new Date(retryAfterHeader).getTime();
+    if (Number.isFinite(retryDate)) {
+        return Math.max(retryDate - Date.now(), SHIP_AND_CO_RATE_LIMIT_COOLDOWN_MS);
+    }
+    return SHIP_AND_CO_RATE_LIMIT_COOLDOWN_MS;
+};
+
+const isRateLimitedError = (error) => error?.response?.status === 429;
+
+const markShipcoRateLimited = (error, context) => {
+    const retryAfterMs = getRetryAfterMs(error);
+    const nextAllowedAt = Date.now() + retryAfterMs;
+    shipcoRateLimitedUntil = Math.max(shipcoRateLimitedUntil, nextAllowedAt);
+    console.warn(
+        `[shipcoService] Rate limited during ${context}. Cooling down Ship&Co requests for ${retryAfterMs}ms until ${new Date(shipcoRateLimitedUntil).toISOString()}`
+    );
+};
+
+const shouldSkipShipcoRequest = (context) => {
+    if (Date.now() < shipcoRateLimitedUntil) {
+        console.warn(
+            `[shipcoService] Skipping ${context} because Ship&Co is cooling down until ${new Date(shipcoRateLimitedUntil).toISOString()}`
+        );
+        return true;
+    }
+    return false;
+};
+
+const logShipcoError = async (errorType, error, additionalInfo = {}) => {
+    await logError({
+        itemId: additionalInfo.itemId || additionalInfo.reference || additionalInfo.trackingNumber || 'shipco',
+        errorType,
+        errorMessage: error?.message || 'Unknown Ship&Co error',
+        additionalInfo: {
+            status: error?.response?.status || null,
+            responseData: error?.response?.data || null,
+            ...additionalInfo,
+        },
     });
 };
 
@@ -325,6 +379,9 @@ const fetchShipmentDetailsByReference = async (reference) => {
     if (!reference) {
         return null;
     }
+    if (shouldSkipShipcoRequest(`reference lookup for ${reference}`)) {
+        return null;
+    }
     const client = buildClient();
     if (!client) {
         console.warn('[shipcoService] Ship&Co client is not configured. Missing SHIPANDCO_API_TOKEN?');
@@ -397,6 +454,10 @@ const fetchShipmentDetailsByReference = async (reference) => {
             console.info(
                 `[shipcoService] Direct shipment lookup failed for reference ${reference}. status=${status}`
             );
+            if (isRateLimitedError(directError)) {
+                markShipcoRateLimited(directError, `direct reference lookup for ${reference}`);
+                return null;
+            }
         }
         const params = {
             scope: 'all',
@@ -474,7 +535,10 @@ const fetchShipmentDetailsByReference = async (reference) => {
             carrier,
         };
     } catch (error) {
-        logError('shipcoService.fetchTrackingByReference', error);
+        if (isRateLimitedError(error)) {
+            markShipcoRateLimited(error, `reference lookup fallback for ${reference}`);
+        }
+        await logShipcoError('shipcoService.fetchTrackingByReference', error, { reference });
         console.error('[shipcoService] Failed to fetch tracking by reference:', reference, error?.message || error);
         return null;
     }
@@ -484,6 +548,9 @@ exports.fetchShipmentDetailsByReference = fetchShipmentDetailsByReference;
 
 const fetchShipmentDetailsByTracking = async (trackingNumber) => {
     if (!trackingNumber) {
+        return null;
+    }
+    if (shouldSkipShipcoRequest(`tracking lookup for ${trackingNumber}`)) {
         return null;
     }
     const client = buildClient();
@@ -568,7 +635,10 @@ const fetchShipmentDetailsByTracking = async (trackingNumber) => {
             carrier,
         };
     } catch (error) {
-        logError('shipcoService.fetchShipmentDetailsByTracking', error);
+        if (isRateLimitedError(error)) {
+            markShipcoRateLimited(error, `tracking lookup for ${trackingNumber}`);
+        }
+        await logShipcoError('shipcoService.fetchShipmentDetailsByTracking', error, { trackingNumber });
         console.error('[shipcoService] Failed to fetch shipment by tracking:', trackingNumber, error?.message || error);
         return null;
     }
@@ -577,6 +647,9 @@ const fetchShipmentDetailsByTracking = async (trackingNumber) => {
 exports.fetchShipmentDetailsByTracking = fetchShipmentDetailsByTracking;
 
 exports.fetchRates = async (payload) => {
+    if (shouldSkipShipcoRequest('rates lookup')) {
+        return [];
+    }
     const client = buildClient();
     if (!client) {
         console.warn('[shipcoService] Ship&Co client is not configured. Missing SHIPANDCO_API_TOKEN?');
@@ -602,13 +675,19 @@ exports.fetchRates = async (payload) => {
         }
         return response.data || [];
     } catch (error) {
-        logError('shipcoService.fetchRates', error);
+        if (isRateLimitedError(error)) {
+            markShipcoRateLimited(error, 'rates lookup');
+        }
+        await logShipcoError('shipcoService.fetchRates', error);
         console.error('[shipcoService] Failed to fetch rates:', error?.response?.data || error?.message || error);
         throw error;
     }
 };
 
 exports.createShipment = async (payload) => {
+    if (shouldSkipShipcoRequest('shipment creation')) {
+        throw new Error('Ship&Co requests are temporarily paused after rate limiting');
+    }
     const client = buildClient();
     if (!client) {
         console.warn('[shipcoService] Ship&Co client is not configured. Missing SHIPANDCO_API_TOKEN?');
@@ -618,7 +697,10 @@ exports.createShipment = async (payload) => {
         const response = await client.post('/shipments', payload);
         return response.data;
     } catch (error) {
-        logError('shipcoService.createShipment', error);
+        if (isRateLimitedError(error)) {
+            markShipcoRateLimited(error, 'shipment creation');
+        }
+        await logShipcoError('shipcoService.createShipment', error);
         console.error('[shipcoService] Failed to create shipment:', error?.response?.data || error?.message || error);
         throw error;
     }

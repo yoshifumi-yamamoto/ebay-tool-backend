@@ -1,6 +1,6 @@
 const axios = require('axios');
 const supabase = require('../supabaseClient');
-const { fetchEbayAccountTokens, refreshEbayToken, getRefreshTokenByEbayUserId } = require("./accountService");
+const { refreshEbayToken, getRefreshTokenByEbayUserId, EBAY_SCOPES } = require("./accountService");
 const { logError } = require('./loggingService');
 const { logSystemError } = require('./systemErrorService');
 
@@ -42,7 +42,7 @@ async function uploadTrackingInfoToEbay({
   }
 
   const refreshToken = await getRefreshTokenByEbayUserId(order.ebay_user_id);
-  const accessToken = await refreshEbayToken(refreshToken);
+  const accessToken = await refreshEbayToken(refreshToken, { scope: EBAY_SCOPES.FULFILLMENT });
 
   const resolvedLineItems = Array.isArray(lineItems) && lineItems.length > 0
     ? lineItems
