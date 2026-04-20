@@ -14,6 +14,39 @@ const NEGOTIATION_API_BASE = 'https://api.ebay.com/sell/negotiation/v1';
 const SEND_OFFER_BACKFILL_MAX_PAGES = Number(process.env.SEND_OFFER_BACKFILL_MAX_PAGES || 10);
 const SEND_OFFER_DETAIL_BACKFILL_MAX = Number(process.env.SEND_OFFER_DETAIL_BACKFILL_MAX || 50);
 
+const normalizeEbayDateTime = (value) => {
+    if (!value) return null;
+    const normalized = typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, '_')
+        ? value._
+        : value;
+    const iso = String(normalized || '').trim();
+    if (!iso) return null;
+    const parsed = new Date(iso);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString();
+};
+
+const convertIsoToJstTimestamp = (value) => {
+    const iso = normalizeEbayDateTime(value);
+    if (!iso) return null;
+    const parsed = new Date(iso);
+    const formatter = new Intl.DateTimeFormat('sv-SE', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+    });
+    const parts = formatter.formatToParts(parsed).reduce((acc, part) => {
+        if (part.type !== 'literal') acc[part.type] = part.value;
+        return acc;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+};
+
 const normalizeLegacyItemId = (value) => {
     if (value === null || value === undefined) return null;
     const raw = String(value).trim();
@@ -257,6 +290,8 @@ async function getSendOfferEligibleItems(accountId, { limit = 20, offset = 0 } =
                             category_id: getTextValue(detail?.PrimaryCategory?.CategoryID),
                             category_name: getTextValue(detail?.PrimaryCategory?.CategoryName),
                             view_item_url: getTextValue(detail?.ListingDetails?.ViewItemURL) || getTextValue(detail?.ListingDetails?.ViewItemURLForNaturalSearch),
+                            listing_date_utc: normalizeEbayDateTime(detail?.ListingDetails?.StartTime || detail?.StartTime),
+                            listing_date_jst: convertIsoToJstTimestamp(detail?.ListingDetails?.StartTime || detail?.StartTime),
                             updated_at: new Date().toISOString(),
                         };
                         const { data: updatedRows, error: updateError } = await supabase
@@ -960,26 +995,38 @@ const normalizeBidPercentage = (value) => {
 const fetchActiveListingIds = async (userId, ebayUserId) => {
     const ids = [];
     const pageSize = 1000;
-    let offset = 0;
+    let lastItemId = null;
+
     for (let page = 0; page < 200; page += 1) {
-        const { data, error } = await supabase
+        let query = supabase
             .from('items')
             .select('ebay_item_id')
             .eq('user_id', userId)
             .eq('ebay_user_id', ebayUserId)
             .eq('listing_status', 'ACTIVE')
+            .not('ebay_item_id', 'is', null)
             .order('ebay_item_id', { ascending: true })
-            .range(offset, offset + pageSize - 1);
+            .limit(pageSize);
+
+        if (lastItemId !== null) {
+            query = query.gt('ebay_item_id', lastItemId);
+        }
+
+        const { data, error } = await query;
         if (error) {
             throw new Error(`Failed to fetch active listings: ${error.message}`);
         }
+
         const pageIds = (data || []).map((item) => item.ebay_item_id).filter(Boolean);
         ids.push(...pageIds);
+
         if (pageIds.length < pageSize) {
             break;
         }
-        offset += pageSize;
+
+        lastItemId = pageIds[pageIds.length - 1];
     }
+
     return ids;
 };
 
@@ -1180,7 +1227,15 @@ async function bulkApplyPromotedListings({ accountIds = [], bidPercentage, endDa
         const chunkResults = await Promise.all(chunk.map((accountId) => processAccount(accountId)));
         results.push(...chunkResults);
     }
-    return { results };
+
+    const successCount = results.filter((row) => !row.error).length;
+    const failureCount = results.length - successCount;
+
+    return {
+        results,
+        successCount,
+        failureCount,
+    };
 }
 
 module.exports = {
