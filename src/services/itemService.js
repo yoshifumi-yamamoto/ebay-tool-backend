@@ -84,6 +84,41 @@ function mapViewItemUrlToMarketplaceId(viewItemUrl) {
     return null;
 }
 
+function normalizeEbayDateTime(value) {
+    if (!value) return null;
+    const normalized = typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, '_')
+        ? value._
+        : value;
+    const iso = String(normalized || '').trim();
+    if (!iso) return null;
+    const parsed = new Date(iso);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString();
+}
+
+function convertIsoToJstTimestamp(value) {
+    const iso = normalizeEbayDateTime(value);
+    if (!iso) return null;
+    const parsed = new Date(iso);
+    const formatter = new Intl.DateTimeFormat('sv-SE', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+    });
+
+    const parts = formatter.formatToParts(parsed).reduce((acc, part) => {
+        if (part.type !== 'literal') acc[part.type] = part.value;
+        return acc;
+    }, {});
+
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
 function formatForEbayAPI(octoparseData, matchingItems) {
     return octoparseData.map((data) => {
         const quantity = isSoldOut(data["在庫"]) ? 0 : parseInt(data["在庫"], 10) || 1; // 数量が空の場合に1をデフォルト設定
@@ -314,6 +349,7 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                 : item.PictureDetails?.PictureURL;
             const viewItemUrl = getTextValue(item?.ListingDetails?.ViewItemURL) || getTextValue(item?.ListingDetails?.ViewItemURLForNaturalSearch);
             const siteCode = getTextValue(item?.Site);
+            const listingDateUtc = normalizeEbayDateTime(item?.ListingDetails?.StartTime || item?.StartTime);
             return {
                 legacyItemId: getTextValue(item.ItemID),
                 sku: getTextValue(item?.SKU),
@@ -329,6 +365,8 @@ async function fetchActiveListings(authToken, pageNumber = 1, entriesPerPage = 1
                 current_price_currency: currentPrice?.$?.currencyID || null,
                 primary_image_url: primaryImage || null,
                 view_item_url: viewItemUrl,
+                listing_date_utc: listingDateUtc,
+                listing_date_jst: convertIsoToJstTimestamp(listingDateUtc),
             };
         });
 
@@ -387,7 +425,9 @@ async function updateItemsTable(listings, userId, ebayUserId) {
             current_price_value,
             current_price_currency,
             primary_image_url,
-            view_item_url
+            view_item_url,
+            listing_date_utc,
+            listing_date_jst,
         } = listing;
 
         try {
@@ -395,14 +435,16 @@ async function updateItemsTable(listings, userId, ebayUserId) {
             const existingItem = await retryFetch(async () => {
                 const { data, error } = await supabase
                     .from('items')
-                    .select('quantity')
+                    .select('quantity, item_title')
                     .eq('ebay_item_id', legacyItemId)
+                    .eq('ebay_user_id', ebayUserId)
                     .maybeSingle();
                 if (error) throw error;
                 return data;
             });
 
             if (existingItem) {
+                const nextItemTitle = item_title || existingItem.item_title || null;
                 // 一致するデータがあれば、数量と同期日を更新
                 await retryFetch(async () => {
                     const { error } = await supabase
@@ -414,15 +456,18 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                             category_id,
                             category_name,
                             category_path,
-                            item_title,
+                            item_title: nextItemTitle,
                             sku,
                             marketplace_id,
                             current_price_value,
                             current_price_currency,
                             primary_image_url,
-                            view_item_url
+                            view_item_url,
+                            listing_date_utc,
+                            listing_date_jst,
                         })
-                        .eq('ebay_item_id', legacyItemId);
+                        .eq('ebay_item_id', legacyItemId)
+                        .eq('ebay_user_id', ebayUserId);
                     if (error) throw error;
                 });
                 updatedCount += 1;
@@ -447,7 +492,9 @@ async function updateItemsTable(listings, userId, ebayUserId) {
                             current_price_currency,
                             marketplace_id,
                             primary_image_url,
-                            view_item_url
+                            view_item_url,
+                            listing_date_utc,
+                            listing_date_jst,
                         });
                     if (error) throw error;
                 });
@@ -492,6 +539,66 @@ async function updateItemsTable(listings, userId, ebayUserId) {
     });
 
     return { updatedCount, insertedCount, failedCount };
+}
+
+async function backfillMissingItemTitles({ listings, authToken, userId, ebayUserId }) {
+    const targets = (Array.isArray(listings) ? listings : [])
+        .filter((listing) => listing?.legacyItemId)
+        .filter((listing) => !String(listing?.item_title || '').trim());
+
+    if (targets.length === 0) {
+        return { attempted: 0, updated: 0, failed: 0 };
+    }
+
+    let updated = 0;
+    let failed = 0;
+
+    for (const listing of targets) {
+        try {
+            const detail = await fetchItemDetails(listing.legacyItemId, authToken);
+            const nextTitle = typeof detail?.Title === 'object' && Object.prototype.hasOwnProperty.call(detail.Title, '_')
+                ? detail.Title._
+                : detail?.Title;
+            const normalizedTitle = String(nextTitle || '').trim();
+            if (!normalizedTitle) {
+                continue;
+            }
+
+            const { error } = await supabase
+                .from('items')
+                .update({
+                    item_title: normalizedTitle,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('user_id', userId)
+                .eq('ebay_user_id', ebayUserId)
+                .eq('ebay_item_id', listing.legacyItemId);
+
+            if (error) {
+                throw error;
+            }
+
+            updated += 1;
+        } catch (error) {
+            failed += 1;
+            console.warn('[itemService] item title backfill failed', {
+                userId,
+                ebayUserId,
+                legacyItemId: listing.legacyItemId,
+                message: error.message,
+            });
+        }
+    }
+
+    logSyncEvent('info', 'item title backfill summary', {
+        userId,
+        ebayUserId,
+        attempted: targets.length,
+        updated,
+        failed,
+    });
+
+    return { attempted: targets.length, updated, failed };
 }
 
 
@@ -555,6 +662,12 @@ async function syncActiveListingsForUser(userId) {
                 totalEntries,
             });
             const firstPageSync = await updateItemsTable(firstPageData.listings, userId, ebayUserId);
+            await backfillMissingItemTitles({
+                listings: firstPageData.listings,
+                authToken,
+                userId,
+                ebayUserId,
+            });
             logSyncEvent('info', 'listings page synced', {
                 ebayUserId,
                 page: 1,
@@ -591,6 +704,12 @@ async function syncActiveListingsForUser(userId) {
                         statusCounts,
                     });
                     const pageSync = await updateItemsTable(pageData.listings, userId, ebayUserId);
+                    await backfillMissingItemTitles({
+                        listings: pageData.listings,
+                        authToken,
+                        userId,
+                        ebayUserId,
+                    });
                     logSyncEvent('info', 'listings page synced', {
                         ebayUserId,
                         page: pageNumber,
