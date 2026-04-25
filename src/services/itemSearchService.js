@@ -10,6 +10,67 @@ require('dotenv').config();
 
 // 仮の為替レート
 const USDJPY = 140
+const ENV_EXCHANGE_RATES = {
+  USD: Number(process.env.EXCHANGE_RATE_USD_TO_JPY) || 150,
+  EUR: Number(process.env.EXCHANGE_RATE_EUR_TO_JPY) || null,
+  CAD: Number(process.env.EXCHANGE_RATE_CAD_TO_JPY) || null,
+  GBP: Number(process.env.EXCHANGE_RATE_GBP_TO_JPY) || null,
+  AUD: Number(process.env.EXCHANGE_RATE_AUD_TO_JPY) || null,
+  JPY: 1,
+};
+
+const normalizeCurrencyCode = (value) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed.toUpperCase() : null;
+};
+
+const toNumber = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return 0;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const loadUserExchangeRates = async (userId) => {
+  const rates = { ...ENV_EXCHANGE_RATES, JPY: 1 };
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('usd_rate, eur_rate, cad_rate, gbp_rate, aud_rate')
+      .eq('id', userId)
+      .single();
+
+    if (error || !data) {
+      if (error) {
+        console.error('[item-search] Failed to load user exchange rates:', error.message);
+      }
+      return rates;
+    }
+
+    const mapping = {
+      usd_rate: 'USD',
+      eur_rate: 'EUR',
+      cad_rate: 'CAD',
+      gbp_rate: 'GBP',
+      aud_rate: 'AUD',
+    };
+
+    Object.entries(mapping).forEach(([column, currency]) => {
+      const numeric = Number(data[column]);
+      if (Number.isFinite(numeric)) {
+        rates[currency] = numeric;
+      }
+    });
+  } catch (error) {
+    console.error('[item-search] Unexpected exchange rate load error:', error.message);
+  }
+
+  return rates;
+};
 
 const getNextMonth = (reportMonth) => {
   const [year, month] = reportMonth.split('-').map(Number);
@@ -310,6 +371,7 @@ async function searchItemsSimple(queryParams) {
   }
 
   const rows = Array.isArray(data) ? data : [];
+  const exchangeRates = await loadUserExchangeRates(user_id);
 
   if (ebay_item_id) {
     const enrichedRows = await Promise.all(
@@ -339,10 +401,23 @@ async function searchItemsSimple(queryParams) {
         }
       })
     );
-    return { items: enrichedRows.filter((row) => row?.is_us_listing === true) };
+    return {
+      items: enrichedRows.filter((row) => row?.is_us_listing === true),
+      exchangeRates,
+    };
   }
 
-  return { items: rows };
+  const items = rows.map((row) => ({
+    ...row,
+    current_price_currency: normalizeCurrencyCode(row.current_price_currency) || 'USD',
+    cost_price: toNumber(row.cost_price),
+    estimated_shipping_cost: toNumber(row.estimated_shipping_cost),
+    current_price_value: row.current_price_value === null || row.current_price_value === undefined
+      ? null
+      : Number(row.current_price_value),
+  }));
+
+  return { items, exchangeRates };
 }
 
 const normalizeSearchText = (value) => String(value || '')
